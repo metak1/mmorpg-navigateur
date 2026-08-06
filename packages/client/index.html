@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>mmorpg-navigateur</title>
+    <style>
+      html, body { margin: 0; background: #111; }
+      #app { display: flex; justify-content: center; align-items: center; height: 100vh; }
+
+      #login-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: #111;
+        font-family: sans-serif;
+      }
+      #login-form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 24px;
+        background: #1e1e1e;
+        border-radius: 8px;
+        min-width: 240px;
+      }
+      #login-form h1 {
+        margin: 0 0 4px;
+        color: #fff;
+        font-size: 18px;
+      }
+      #username-input {
+        padding: 8px;
+        font-size: 14px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #111;
+        color: #fff;
+      }
+      #login-form button {
+        padding: 8px;
+        font-size: 14px;
+        border-radius: 4px;
+        border: none;
+        background: #00ff88;
+        color: #111;
+        cursor: pointer;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="login-overlay">
+      <form id="login-form">
+        <h1>mmorpg-navigateur</h1>
+        <input id="username-input" type="text" placeholder="Username" autocomplete="off" required />
+        <button type="submit">Play</button>
+      </form>
+    </div>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

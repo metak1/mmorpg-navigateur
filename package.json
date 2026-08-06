@@ -1,0 +1,16 @@
+{
+  "name": "mmorpg-navigateur",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build -w shared && concurrently -n server,client,admin -c blue,green,yellow \"npm:dev -w server\" \"npm:dev -w client\" \"npm:dev -w admin\"",
+    "build": "npm run build -w shared && npm run build -w server && npm run build -w client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,80 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Account {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  x         Float
+  y         Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MonsterTemplate {
+  id                 String   @id @default(cuid())
+  name               String
+  maxHp              Float
+  wanderRadius       Float
+  wanderIntervalMs   Int
+  wanderSpeed        Float
+  aggroRange         Float
+  chaseSpeed         Float
+  attackRange        Float
+  touchDamage        Float
+  attackCooldownMs   Int
+  spawns             MonsterSpawn[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model SpellTemplate {
+  id              String   @id @default(cuid())
+  keybind         Int      @unique
+  name            String
+  kind            String
+  cooldownMs      Int
+  color           Int
+  size            Float
+  damage          Float?
+  projectileSpeed Float?
+  maxRange        Float?
+  aoeRadius       Float?
+  slowMultiplier  Float?
+  slowDurationMs  Int?
+  healAmount      Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model GameMap {
+  id        String   @id @default(cuid())
+  name      String
+  width     Int
+  height    Int
+  tileSize  Int      @default(32)
+  tileData  String
+  spawnX    Float
+  spawnY    Float
+  isActive  Boolean  @default(false)
+  spawns    MonsterSpawn[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MonsterSpawn {
+  id                String          @id @default(cuid())
+  mapId             String
+  map               GameMap         @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  monsterTemplateId String
+  monsterTemplate   MonsterTemplate @relation(fields: [monsterTemplateId], references: [id], onDelete: Cascade)
+  x                 Float
+  y                 Float
+}
