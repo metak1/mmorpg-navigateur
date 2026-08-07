@@ -3,6 +3,15 @@ import type { SpellId } from "./spells.js";
 export const WORLD_ROOM = "world";
 export const MOVE_SPEED = 200; // px/sec
 
+// Options sent when joining the world room. `className` is only consulted
+// for a brand-new account — an existing account's stored class always wins
+// (see WorldRoom.onJoin), so a returning player's login-form selection is
+// simply ignored.
+export interface JoinOptions {
+  name: string;
+  className?: string;
+}
+
 export interface MoveInputMessage {
   dx: number;
   dy: number;
@@ -33,4 +42,15 @@ export interface GroundAoeEventMessage {
   y: number;
   radius: number;
   color: number;
+}
+
+// Sent back to the casting client only, when a targeted cast (single/aoe/
+// slow) resolves with no valid target left — e.g. the monster died in the
+// window between being targeted and the cast (possibly after a cast-time
+// delay) actually resolving. The per-spell cooldown is refunded server-side
+// when this fires, so the client rolls back its optimistic cooldown/cast-bar
+// UI to match, instead of leaving it playing out for a cast that never
+// happened.
+export interface CastFizzledMessage {
+  spellId: SpellId;
 }

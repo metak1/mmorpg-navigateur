@@ -80,6 +80,26 @@ function isBlockedAt(grid: TileGrid, x: number, y: number): boolean {
   return corners.some(([cx, cy]) => !isWalkable(getTileAt(grid, cx, cy)));
 }
 
+// Samples points along the segment at a quarter-tile step (fine enough to
+// never skip over a grid-aligned wall cell) and checks each is walkable.
+// Used to require line-of-sight before a targeted spell is allowed to land —
+// a wall between caster and target blocks it, the same as it blocks a
+// projectile physically flying into one (see WorldRoom.updateProjectiles).
+export function hasLineOfSight(grid: TileGrid, x1: number, y1: number, x2: number, y2: number): boolean {
+  const dist = Math.hypot(x2 - x1, y2 - y1);
+  if (dist === 0) return true;
+
+  const step = grid.tileSize / 4;
+  const steps = Math.ceil(dist / step);
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = x1 + (x2 - x1) * t;
+    const y = y1 + (y2 - y1) * t;
+    if (!isWalkable(getTileAt(grid, x, y))) return false;
+  }
+  return true;
+}
+
 // Per-axis collision resolution: try the X move, then the Y move against the
 // (possibly already-corrected) X position, so players slide along walls
 // instead of freezing whenever diagonal input touches an obstacle. Used

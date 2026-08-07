@@ -7,6 +7,7 @@ import { WorldRoom } from "./rooms/WorldRoom.js";
 import { monstersRouter } from "./api/monsters.js";
 import { spellsRouter } from "./api/spells.js";
 import { mapsRouter } from "./api/maps.js";
+import { classesRouter } from "./api/classes.js";
 
 const port = Number(process.env.PORT ?? 2567);
 
@@ -16,6 +17,7 @@ app.use(express.json());
 app.use("/api/monsters", monstersRouter);
 app.use("/api/spells", spellsRouter);
 app.use("/api/maps", mapsRouter);
+app.use("/api/classes", classesRouter);
 
 const httpServer = http.createServer(app);
 

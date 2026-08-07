@@ -8,4 +8,6 @@ export class Player extends Schema {
   @type("string") direction: "up" | "down" | "left" | "right" = "down";
   @type("number") hp: number = 0;
   @type("number") maxHp: number = 0;
+  @type("string") classId: string = "";
+  @type("string") className: string = "";
 }

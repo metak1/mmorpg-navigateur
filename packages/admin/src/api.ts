@@ -1,4 +1,6 @@
 import type {
+  ClassTemplateDTO,
+  ClassTemplateInput,
   MonsterTemplateDTO,
   MonsterTemplateInput,
   SpellTemplateDTO,
@@ -25,6 +27,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listClasses: () => request<ClassTemplateDTO[]>("/api/classes"),
+  createClass: (data: ClassTemplateInput) =>
+    request<ClassTemplateDTO>("/api/classes", { method: "POST", body: JSON.stringify(data) }),
+  updateClass: (id: string, data: ClassTemplateInput) =>
+    request<ClassTemplateDTO>(`/api/classes/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteClass: (id: string) => request<void>(`/api/classes/${id}`, { method: "DELETE" }),
+
   listMonsters: () => request<MonsterTemplateDTO[]>("/api/monsters"),
   createMonster: (data: MonsterTemplateInput) =>
     request<MonsterTemplateDTO>("/api/monsters", { method: "POST", body: JSON.stringify(data) }),

@@ -96,13 +96,21 @@
         color: #fff;
         font-size: 18px;
       }
-      #username-input {
+      #username-input,
+      #class-select {
         padding: 8px;
         font-size: 14px;
         border-radius: 4px;
         border: 1px solid #444;
         background: #111;
         color: #fff;
+      }
+      #class-select-label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+        color: #999;
       }
       #login-form button {
         padding: 8px;
@@ -121,6 +129,10 @@
       <form id="login-form">
         <h1>mmorpg-navigateur</h1>
         <input id="username-input" type="text" placeholder="Username" autocomplete="off" required />
+        <label id="class-select-label">
+          Class (new characters only)
+          <select id="class-select"></select>
+        </label>
         <button type="submit">Play</button>
       </form>
     </div>

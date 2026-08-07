@@ -1,4 +1,4 @@
-import type { ActiveMapResponse, SpellTemplateDTO } from "shared";
+import type { ActiveMapResponse, SpellTemplateDTO, ClassTemplateDTO } from "shared";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "ws://localhost:2567";
 const API_BASE_URL = SERVER_URL.replace(/^ws/, "http");
@@ -17,4 +17,12 @@ export async function fetchSpells(): Promise<SpellTemplateDTO[]> {
     throw new Error(`Failed to fetch spells: ${response.status}`);
   }
   return response.json() as Promise<SpellTemplateDTO[]>;
+}
+
+export async function fetchClasses(): Promise<ClassTemplateDTO[]> {
+  const response = await fetch(`${API_BASE_URL}/api/classes`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch classes: ${response.status}`);
+  }
+  return response.json() as Promise<ClassTemplateDTO[]>;
 }

@@ -10,12 +10,24 @@ datasource db {
 }
 
 model Account {
-  id        String   @id @default(cuid())
-  username  String   @unique
+  id        String         @id @default(cuid())
+  username  String         @unique
   x         Float
   y         Float
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  classId   String?
+  class     ClassTemplate? @relation(fields: [classId], references: [id])
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model ClassTemplate {
+  id        String          @id @default(cuid())
+  name      String          @unique
+  color     Int
+  spells    SpellTemplate[]
+  accounts  Account[]
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
 }
 
 model MonsterTemplate {
@@ -36,12 +48,14 @@ model MonsterTemplate {
 }
 
 model SpellTemplate {
-  id              String   @id @default(cuid())
-  keybind         Int      @unique
+  id              String        @id @default(cuid())
+  classId         String
+  class           ClassTemplate @relation(fields: [classId], references: [id], onDelete: Cascade)
+  keybind         Int
   name            String
   kind            String
   cooldownMs      Int
-  castTimeMs      Int      @default(0)
+  castTimeMs      Int           @default(0)
   color           Int
   size            Float
   damage          Float?
@@ -51,8 +65,10 @@ model SpellTemplate {
   slowMultiplier  Float?
   slowDurationMs  Int?
   healAmount      Float?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([classId, keybind])
 }
 
 model GameMap {

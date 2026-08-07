@@ -11,16 +11,19 @@ import {
   resolveMovement,
   getTileAt,
   isWalkable,
+  hasLineOfSight,
   MONSTER_RESPAWN_MS,
   PLAYER_MAX_HP,
   PLAYER_RESPAWN_INVULNERABLE_MS,
   GLOBAL_COOLDOWN_MS,
   PROJECTILE_HIT_RADIUS,
   type TileGrid,
+  type JoinOptions,
   type MoveInputMessage,
   type CastInputMessage,
   type HealEventMessage,
   type GroundAoeEventMessage,
+  type CastFizzledMessage,
   type SpellId,
   type SpellDef,
   type SpellKind,
@@ -47,6 +50,12 @@ interface ProjectileRuntime {
   dirX: number;
   dirY: number;
   spellId: SpellId;
+  classId: string;
+  // Present for monster-targeted casts (single/aoe/slow) — the projectile
+  // re-aims at this target's current position every tick (see
+  // updateProjectiles), so a moving monster can't dodge by outrunning the
+  // direction the projectile was launched in.
+  targetId?: string;
 }
 
 export class WorldRoom extends Room<RoomState> {
@@ -64,7 +73,7 @@ export class WorldRoom extends Room<RoomState> {
   private mapGrid: TileGrid = { tileData: [[0]], tileSize: 32, cols: 1, rows: 1 };
   private spawnX = 0;
   private spawnY = 0;
-  private spellDefs = new Map<SpellId, SpellDef>();
+  private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
 
   async onCreate() {
     this.setState(new RoomState());
@@ -85,7 +94,12 @@ export class WorldRoom extends Room<RoomState> {
 
     const spellRows = await prisma.spellTemplate.findMany();
     for (const spell of spellRows) {
-      this.spellDefs.set(spell.keybind as SpellId, {
+      let classSpells = this.spellDefsByClass.get(spell.classId);
+      if (!classSpells) {
+        classSpells = new Map();
+        this.spellDefsByClass.set(spell.classId, classSpells);
+      }
+      classSpells.set(spell.keybind as SpellId, {
         name: spell.name,
         kind: spell.kind as SpellKind,
         cooldownMs: spell.cooldownMs,
@@ -146,8 +160,9 @@ export class WorldRoom extends Room<RoomState> {
   private handleCast(client: Client, message: CastInputMessage) {
     const sessionId = client.sessionId;
     const player = this.state.players.get(sessionId);
-    const spell = this.spellDefs.get(message.spellId);
-    if (!player || !spell) return;
+    if (!player) return;
+    const spell = this.spellDefsByClass.get(player.classId)?.get(message.spellId);
+    if (!spell) return;
 
     const now = this.clock.currentTime;
     if ((this.castingUntil.get(sessionId) ?? 0) > now) return; // already mid-cast
@@ -159,8 +174,9 @@ export class WorldRoom extends Room<RoomState> {
 
     // The global cooldown always applies the moment a cast is accepted,
     // regardless of this specific spell's own cooldown/cast-time outcome —
-    // unlike the per-spell cooldown, it is not waived if the cast is later
-    // interrupted (see interruptCast).
+    // unlike the per-spell cooldown (applied in resolveCastEffect, only once
+    // an effect actually lands), the GCD is not waived if the cast is later
+    // interrupted (see interruptCast) or fizzles (see resolveCastEffect).
     this.gcdUntil.set(sessionId, now + GLOBAL_COOLDOWN_MS);
 
     if (spell.castTimeMs > 0) {
@@ -168,16 +184,11 @@ export class WorldRoom extends Room<RoomState> {
       const timeout = this.clock.setTimeout(() => {
         this.castingUntil.delete(sessionId);
         this.castTimeouts.delete(sessionId);
-        // Cooldown only starts once the channel actually completes — an
-        // interrupted cast (see interruptCast) never reaches this line, so
-        // it doesn't cost anything.
-        this.lastCastAt.set(key, this.clock.currentTime);
-        this.resolveCastEffect(sessionId, spell, message);
+        this.resolveCastEffect(client, key, spell, message);
       }, spell.castTimeMs);
       this.castTimeouts.set(sessionId, timeout);
     } else {
-      this.lastCastAt.set(key, now);
-      this.resolveCastEffect(sessionId, spell, message);
+      this.resolveCastEffect(client, key, spell, message);
     }
   }
 
@@ -192,24 +203,39 @@ export class WorldRoom extends Room<RoomState> {
   // Runs immediately for instant spells, or after the cast-time delay elapses
   // for channeled ones. Re-reads player/target state at call time so a
   // channeled cast reflects wherever things have moved to by the time it
-  // resolves, and quietly no-ops if the caster left or the target died.
-  private resolveCastEffect(sessionId: string, spell: SpellDef, message: CastInputMessage) {
+  // resolves. The per-spell cooldown (`cooldownKey`) is only applied once an
+  // effect actually lands — a targeted cast whose target died in the
+  // meantime fizzles instead of silently doing nothing: no cooldown is spent,
+  // and the caster is told so their hotbar can roll back instead of showing
+  // a cast that never happened.
+  private resolveCastEffect(client: Client, cooldownKey: string, spell: SpellDef, message: CastInputMessage) {
+    const sessionId = client.sessionId;
     const player = this.state.players.get(sessionId);
     if (!player) return;
 
     if (spell.kind === "heal") {
+      this.lastCastAt.set(cooldownKey, this.clock.currentTime);
       player.hp = Math.min(player.maxHp, player.hp + (spell.healAmount ?? 0));
       this.broadcast("heal", { sessionId } satisfies HealEventMessage);
       return;
     }
 
     if (spell.kind === "groundAoe") {
-      this.resolveGroundAoe(player, spell, message);
+      if (this.resolveGroundAoe(player, spell, message)) {
+        this.lastCastAt.set(cooldownKey, this.clock.currentTime);
+      } else {
+        client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
+      }
       return;
     }
 
     const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
-    if (!target) return;
+    if (!target || !hasLineOfSight(this.mapGrid, player.x, player.y, target.x, target.y)) {
+      client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
+      return;
+    }
+
+    this.lastCastAt.set(cooldownKey, this.clock.currentTime);
 
     const dirX = target.x - player.x;
     const dirY = target.y - player.y;
@@ -222,6 +248,7 @@ export class WorldRoom extends Room<RoomState> {
     projectile.x = player.x;
     projectile.y = player.y;
     projectile.spellId = message.spellId;
+    projectile.classId = player.classId;
     this.state.projectiles.set(id, projectile);
 
     this.projectileRuntime.set(id, {
@@ -230,13 +257,18 @@ export class WorldRoom extends Room<RoomState> {
       dirX: dirX / len,
       dirY: dirY / len,
       spellId: message.spellId,
+      classId: player.classId,
+      targetId: message.targetId,
     });
   }
 
   // Ground-targeted burst: damages every monster and heals every player
   // within aoeRadius of the cast point, clamped to maxRange from the caster.
-  private resolveGroundAoe(player: Player, spell: SpellDef, message: CastInputMessage) {
-    if (message.x === undefined || message.y === undefined) return;
+  // Returns false (and applies nothing) if a wall blocks line-of-sight to
+  // the landing point, so the caller can fizzle the cast instead of letting
+  // it land through cover.
+  private resolveGroundAoe(player: Player, spell: SpellDef, message: CastInputMessage): boolean {
+    if (message.x === undefined || message.y === undefined) return false;
 
     let targetX = message.x;
     let targetY = message.y;
@@ -249,6 +281,8 @@ export class WorldRoom extends Room<RoomState> {
       targetX = player.x + dx * scale;
       targetY = player.y + dy * scale;
     }
+
+    if (!hasLineOfSight(this.mapGrid, player.x, player.y, targetX, targetY)) return false;
 
     const radius = spell.aoeRadius ?? 0;
 
@@ -266,6 +300,7 @@ export class WorldRoom extends Room<RoomState> {
     }
 
     this.broadcast("groundAoe", { x: targetX, y: targetY, radius, color: spell.color } satisfies GroundAoeEventMessage);
+    return true;
   }
 
   private update(deltaTime: number) {
@@ -422,11 +457,28 @@ export class WorldRoom extends Room<RoomState> {
         continue;
       }
 
-      const spell = this.spellDefs.get(runtime.spellId);
+      const spell = this.spellDefsByClass.get(runtime.classId)?.get(runtime.spellId);
       if (!spell) {
         this.state.projectiles.delete(id);
         this.projectileRuntime.delete(id);
         continue;
+      }
+
+      // Homing: a targeted cast re-aims at its target's current position
+      // every tick, so a monster can't dodge a targeted spell just by moving
+      // — it always closes the distance, regardless of where the target
+      // has wandered to since the cast.
+      if (runtime.targetId) {
+        const target = this.state.monsters.get(runtime.targetId);
+        if (target) {
+          const dx = target.x - projectile.x;
+          const dy = target.y - projectile.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 0) {
+            runtime.dirX = dx / dist;
+            runtime.dirY = dy / dist;
+          }
+        }
       }
 
       const speed = spell.projectileSpeed ?? 0;
@@ -456,14 +508,28 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
-  async onJoin(client: Client, options: { name?: string }) {
-    const username = options.name ?? `Player-${client.sessionId.slice(0, 4)}`;
+  async onJoin(client: Client, options: JoinOptions) {
+    const username = options.name || `Player-${client.sessionId.slice(0, 4)}`;
 
-    const account = await prisma.account.upsert({
-      where: { username },
-      update: {},
-      create: { username, x: this.spawnX, y: this.spawnY },
-    });
+    // Class is chosen once, at character creation, and is permanent — an
+    // existing account's stored class always wins over whatever the login
+    // form's dropdown currently shows.
+    let account = await prisma.account.findUnique({ where: { username }, include: { class: true } });
+
+    if (!account) {
+      const chosenClass = await prisma.classTemplate.findUnique({ where: { name: options.className ?? "" } });
+      if (!chosenClass) {
+        throw new Error(`Cannot create account "${username}": unknown or missing class "${options.className}".`);
+      }
+      account = await prisma.account.create({
+        data: { username, x: this.spawnX, y: this.spawnY, classId: chosenClass.id },
+        include: { class: true },
+      });
+    }
+
+    if (!account.class) {
+      throw new Error(`Account "${username}" has no class assigned.`);
+    }
 
     const player = new Player();
     player.sessionId = client.sessionId;
@@ -472,9 +538,11 @@ export class WorldRoom extends Room<RoomState> {
     player.y = account.y;
     player.hp = PLAYER_MAX_HP;
     player.maxHp = PLAYER_MAX_HP;
+    player.classId = account.class.id;
+    player.className = account.class.name;
 
     this.state.players.set(client.sessionId, player);
-    console.log(`${player.name} joined ${this.roomId}`);
+    console.log(`${player.name} (${player.className}) joined ${this.roomId}`);
   }
 
   async onLeave(client: Client) {

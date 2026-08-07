@@ -10,6 +10,7 @@ import type {
   TileGrid,
   HealEventMessage,
   GroundAoeEventMessage,
+  CastFizzledMessage,
 } from "shared";
 import { MOVE_SPEED, resolveMovement } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
@@ -60,8 +61,6 @@ interface ProjectileEntity {
   targetY: number;
 }
 
-const SPELL_IDS: SpellId[] = [1, 2, 3, 4, 5, 6];
-
 // Physical key position (layout-independent), not Phaser's named keydown-*
 // events — those key off KeyboardEvent.keyCode, which on AZERTY and other
 // non-US layouts reports the *shifted* character's code for the number row
@@ -92,7 +91,9 @@ export class WorldScene extends Phaser.Scene {
   private lastDirection: "up" | "down" | "left" | "right" = "down";
   private lastSent = { dx: 0, dy: 0 };
   private username = "Player";
+  private className?: string;
   private mapGrid: TileGrid = { tileData: [[0]], tileSize: 32, cols: 1, rows: 1 };
+  private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
   private spellDefs = new Map<SpellId, SpellDef>();
   private target: Target | null = null;
   private targetRing?: Phaser.GameObjects.Rectangle;
@@ -103,13 +104,15 @@ export class WorldScene extends Phaser.Scene {
   private aimingSpell: SpellId | null = null;
   private groundAoePreviewRing?: Phaser.GameObjects.Arc;
   private groundAoeRangeRing?: Phaser.GameObjects.Arc;
+  private instructionText?: Phaser.GameObjects.Text;
 
   constructor() {
     super("world");
   }
 
-  init(data: { username: string }) {
+  init(data: { username: string; className?: string }) {
     this.username = data.username;
+    this.className = data.className;
   }
 
   preload() {
@@ -126,7 +129,12 @@ export class WorldScene extends Phaser.Scene {
       rows: activeMap.height,
     };
     for (const spell of spells) {
-      this.spellDefs.set(spell.keybind as SpellId, {
+      let classSpells = this.spellDefsByClass.get(spell.classId);
+      if (!classSpells) {
+        classSpells = new Map();
+        this.spellDefsByClass.set(spell.classId, classSpells);
+      }
+      classSpells.set(spell.keybind as SpellId, {
         name: spell.name,
         kind: spell.kind,
         cooldownMs: spell.cooldownMs,
@@ -164,13 +172,6 @@ export class WorldScene extends Phaser.Scene {
 
     this.createTargetPanel();
 
-    this.hud = new Hud(
-      this,
-      SPELL_IDS.map((spellId) => ({ spellId, keyLabel: String(spellId) })),
-      (spellId) => this.handleSpellActivated(spellId),
-    );
-    this.hud.setSpellDefs(this.spellDefs);
-
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (this.aimingSpell) {
         if (pointer.leftButtonDown()) this.confirmAiming(pointer.worldX, pointer.worldY);
@@ -185,12 +186,11 @@ export class WorldScene extends Phaser.Scene {
       this.setTarget(null);
     });
 
-    const spellList = SPELL_IDS.map((spellId) => `${spellId} ${this.spellDefs.get(spellId)?.name ?? "?"}`).join("   ");
-    this.add
+    this.instructionText = this.add
       .text(
         8,
         8,
-        `Arrows / WASD: move    ${spellList}    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
+        `Arrows / WASD: move    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
         {
           fontSize: "14px",
           color: "#ffffff",
@@ -201,11 +201,12 @@ export class WorldScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(1000);
 
-    const { room, $ } = await connectToWorld(this.username);
+    const { room, $ } = await connectToWorld(this.username, this.className);
     this.room = room;
 
     room.onMessage("heal", (msg: HealEventMessage) => this.playHealEffect(msg.sessionId));
     room.onMessage("groundAoe", (msg: GroundAoeEventMessage) => this.playGroundAoeEffect(msg));
+    room.onMessage("castFizzled", (msg: CastFizzledMessage) => this.hud?.cancelCast(msg.spellId));
 
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {
       const spellId = SPELL_KEY_CODES[event.code];
@@ -237,6 +238,7 @@ export class WorldScene extends Phaser.Scene {
           if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
           if (pointer.leftButtonDown()) this.setTarget({ kind: "self" });
         });
+        this.setupSpellbarForClass(player.classId, player.className);
         this.hud?.setHealth(player.hp, player.maxHp);
       }
 
@@ -302,7 +304,7 @@ export class WorldScene extends Phaser.Scene {
     });
 
     $(room.state).projectiles.onAdd((projectile: Projectile, id: string) => {
-      const spell = this.spellDefs.get(projectile.spellId as SpellId);
+      const spell = this.spellDefsByClass.get(projectile.classId)?.get(projectile.spellId as SpellId);
       const size = spell?.size ?? 6;
       const color = spell?.color ?? 0xffffff;
       const shape = this.add.rectangle(projectile.x, projectile.y, size, size, color);
@@ -319,6 +321,28 @@ export class WorldScene extends Phaser.Scene {
       this.projectiles.get(id)?.shape.destroy();
       this.projectiles.delete(id);
     });
+  }
+
+  // Called once, when the local player's own class is known (their spell set
+  // and its size aren't known until then) — builds the hotbar/HUD sized to
+  // that class's kit instead of a fixed universal slot count.
+  private setupSpellbarForClass(classId: string, className: string) {
+    const classSpells = this.spellDefsByClass.get(classId) ?? new Map<SpellId, SpellDef>();
+    this.spellDefs = classSpells;
+
+    const spellIds = [...classSpells.keys()].sort((a, b) => a - b);
+
+    this.hud = new Hud(
+      this,
+      spellIds.map((spellId) => ({ spellId, keyLabel: String(spellId) })),
+      (spellId) => this.handleSpellActivated(spellId),
+    );
+    this.hud.setSpellDefs(this.spellDefs);
+
+    const spellList = spellIds.map((spellId) => `${spellId} ${classSpells.get(spellId)?.name ?? "?"}`).join("   ");
+    this.instructionText?.setText(
+      `${className}    ${spellList}    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
+    );
   }
 
   private createHpBar(x: number, y: number) {
@@ -524,8 +548,9 @@ export class WorldScene extends Phaser.Scene {
     // Moving cancels a channeled cast rather than being blocked outright —
     // mirrors the server, which interrupts the cast the moment movement
     // input arrives instead of rooting the player in place.
-    if ((dx !== 0 || dy !== 0) && this.hud?.isCasting()) {
-      this.hud.cancelCast();
+    if (dx !== 0 || dy !== 0) {
+      const castingSpellId = this.hud?.getCastingSpellId();
+      if (castingSpellId != null) this.hud?.cancelCast(castingSpellId);
     }
 
     if (dx !== this.lastSent.dx || dy !== this.lastSent.dy) {

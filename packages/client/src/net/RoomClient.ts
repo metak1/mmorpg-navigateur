@@ -1,11 +1,14 @@
 import { Client, getStateCallbacks, type Room } from "colyseus.js";
-import { RoomState, WORLD_ROOM } from "shared";
+import { RoomState, WORLD_ROOM, type JoinOptions } from "shared";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "ws://localhost:2567";
 
-export async function connectToWorld(playerName: string) {
+// `className` is only consulted by the server for a brand-new account — an
+// existing account's stored class always wins (see WorldRoom.onJoin).
+export async function connectToWorld(playerName: string, className?: string) {
   const client = new Client(SERVER_URL);
-  const room: Room<RoomState> = await client.joinOrCreate(WORLD_ROOM, { name: playerName });
+  const options: JoinOptions = { name: playerName, className };
+  const room: Room<RoomState> = await client.joinOrCreate(WORLD_ROOM, options);
   const $ = getStateCallbacks(room);
   return { room, $ };
 }

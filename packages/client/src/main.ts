@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { WorldScene } from "./scenes/WorldScene.js";
 import { Sidebar } from "./ui/Sidebar.js";
+import { fetchClasses } from "./net/api.js";
 
 new Sidebar();
 
@@ -13,11 +14,24 @@ const VIEWPORT_HEIGHT = 700;
 const loginOverlay = document.querySelector<HTMLDivElement>("#login-overlay")!;
 const loginForm = document.querySelector<HTMLFormElement>("#login-form")!;
 const usernameInput = document.querySelector<HTMLInputElement>("#username-input")!;
+const classSelect = document.querySelector<HTMLSelectElement>("#class-select")!;
+
+fetchClasses()
+  .then((classes) => {
+    for (const cls of classes) {
+      const option = document.createElement("option");
+      option.value = cls.name;
+      option.textContent = cls.name;
+      classSelect.appendChild(option);
+    }
+  })
+  .catch((err) => console.error("Failed to load classes for login form:", err));
 
 loginForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const username = usernameInput.value.trim();
   if (!username) return;
+  const className = classSelect.value;
 
   loginOverlay.remove();
 
@@ -30,5 +44,5 @@ loginForm.addEventListener("submit", (event) => {
     disableContextMenu: true,
   });
 
-  game.scene.add("world", WorldScene, true, { username });
+  game.scene.add("world", WorldScene, true, { username, className });
 });

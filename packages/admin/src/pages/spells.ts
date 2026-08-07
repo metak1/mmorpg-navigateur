@@ -2,7 +2,7 @@ import type { SpellTemplateDTO, SpellTemplateInput, SpellKind } from "shared";
 import { api } from "../api.js";
 import { renderForm, renderTable, type FieldSpec } from "../ui.js";
 
-const FIELDS: FieldSpec[] = [
+const BASE_FIELDS: FieldSpec[] = [
   {
     name: "keybind",
     label: "Keybind",
@@ -35,28 +35,12 @@ const FIELDS: FieldSpec[] = [
   { name: "healAmount", label: "Heal Amount", type: "number" },
 ];
 
-const DEFAULT_VALUES: Record<string, string | number> = {
-  keybind: 1,
-  name: "New Spell",
-  kind: "single",
-  cooldownMs: 500,
-  castTimeMs: 0,
-  color: "0xffee55",
-  size: 6,
-  damage: 15,
-  projectileSpeed: 400,
-  maxRange: 400,
-  aoeRadius: 0,
-  slowMultiplier: 0.2,
-  slowDurationMs: 3000,
-  healAmount: 0,
-};
-
 function toInput(values: Record<string, string>): SpellTemplateInput {
   const kind = values.kind as SpellKind;
   const num = (key: string): number | null => (values[key] === "" ? null : Number(values[key]));
 
   return {
+    classId: values.classId,
     keybind: Number(values.keybind),
     name: values.name,
     kind,
@@ -93,16 +77,76 @@ function updateFieldVisibility(form: HTMLFormElement) {
 }
 
 export async function renderSpellsPage(container: HTMLElement) {
+  const classes = await api.listClasses();
+  const classNameById = new Map(classes.map((c) => [c.id, c.name]));
+
+  const fields: FieldSpec[] = [
+    {
+      name: "classId",
+      label: "Class",
+      type: "select",
+      options: classes.map((c) => ({ value: c.id, label: c.name })),
+    },
+    ...BASE_FIELDS,
+  ];
+
+  const defaultValues: Record<string, string | number> = {
+    classId: classes[0]?.id ?? "",
+    keybind: 1,
+    name: "New Spell",
+    kind: "single",
+    cooldownMs: 500,
+    castTimeMs: 0,
+    color: "0xffee55",
+    size: 6,
+    damage: 15,
+    projectileSpeed: 400,
+    maxRange: 400,
+    aoeRadius: 0,
+    slowMultiplier: 0.2,
+    slowDurationMs: 3000,
+    healAmount: 0,
+  };
+
   let editingId: string | null = null;
+  let classFilter = "";
 
   const heading = document.createElement("h2");
   heading.textContent = "Spells";
   container.appendChild(heading);
 
+  if (classes.length === 0) {
+    const warning = document.createElement("p");
+    warning.textContent = "Create a class first (Classes tab) before adding spells.";
+    container.appendChild(warning);
+    return;
+  }
+
   const formHeading = document.createElement("h3");
   const formSection = document.createElement("div");
+  const filterSection = document.createElement("div");
   const tableSection = document.createElement("div");
-  container.append(formHeading, formSection, tableSection);
+  container.append(formHeading, formSection, filterSection, tableSection);
+
+  const filterLabel = document.createElement("label");
+  filterLabel.textContent = "Filter by class: ";
+  const filterSelect = document.createElement("select");
+  const allOption = document.createElement("option");
+  allOption.value = "";
+  allOption.textContent = "All classes";
+  filterSelect.appendChild(allOption);
+  for (const cls of classes) {
+    const opt = document.createElement("option");
+    opt.value = cls.id;
+    opt.textContent = cls.name;
+    filterSelect.appendChild(opt);
+  }
+  filterSelect.addEventListener("change", () => {
+    classFilter = filterSelect.value;
+    void renderTableSection();
+  });
+  filterLabel.appendChild(filterSelect);
+  filterSection.appendChild(filterLabel);
 
   function renderFormSection(initial: Record<string, string | number>) {
     formHeading.textContent = editingId ? "Edit Spell" : "New Spell";
@@ -110,7 +154,7 @@ export async function renderSpellsPage(container: HTMLElement) {
 
     const form = renderForm(
       formSection,
-      FIELDS,
+      fields,
       initial,
       async (values) => {
         try {
@@ -121,7 +165,8 @@ export async function renderSpellsPage(container: HTMLElement) {
             await api.createSpell(input);
           }
           editingId = null;
-          await refresh();
+          renderFormSection(defaultValues);
+          await renderTableSection();
         } catch (err) {
           alert(err instanceof Error ? err.message : String(err));
         }
@@ -137,19 +182,20 @@ export async function renderSpellsPage(container: HTMLElement) {
       cancelBtn.textContent = "Cancel";
       cancelBtn.addEventListener("click", () => {
         editingId = null;
-        renderFormSection(DEFAULT_VALUES);
+        renderFormSection(defaultValues);
       });
       formSection.appendChild(cancelBtn);
     }
   }
 
-  async function refresh() {
-    renderFormSection(DEFAULT_VALUES);
+  async function renderTableSection() {
     const list = await api.listSpells();
+    const filtered = classFilter ? list.filter((s) => s.classId === classFilter) : list;
     tableSection.innerHTML = "";
     renderTable<SpellTemplateDTO>(
       tableSection,
       [
+        { key: "classId", label: "Class", format: (v) => classNameById.get(v as string) ?? "?" },
         { key: "keybind", label: "Key" },
         { key: "name", label: "Name" },
         { key: "kind", label: "Kind" },
@@ -157,13 +203,14 @@ export async function renderSpellsPage(container: HTMLElement) {
         { key: "castTimeMs", label: "Cast Time (ms)" },
         { key: "damage", label: "Damage" },
       ],
-      list,
+      filtered,
       [
         {
           label: "Edit",
           onClick: (row) => {
             editingId = row.id;
             renderFormSection({
+              classId: row.classId,
               keybind: row.keybind,
               name: row.name,
               kind: row.kind,
@@ -187,7 +234,7 @@ export async function renderSpellsPage(container: HTMLElement) {
           onClick: async (row) => {
             if (confirm(`Delete spell "${row.name}"?`)) {
               await api.deleteSpell(row.id);
-              await refresh();
+              await renderTableSection();
             }
           },
         },
@@ -195,5 +242,6 @@ export async function renderSpellsPage(container: HTMLElement) {
     );
   }
 
-  await refresh();
+  renderFormSection(defaultValues);
+  await renderTableSection();
 }

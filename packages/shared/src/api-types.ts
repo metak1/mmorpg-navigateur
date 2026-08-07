@@ -1,5 +1,13 @@
 import type { SpellKind } from "./spells.js";
 
+export interface ClassTemplateDTO {
+  id: string;
+  name: string;
+  color: number;
+}
+
+export type ClassTemplateInput = Omit<ClassTemplateDTO, "id">;
+
 export interface MonsterTemplateDTO {
   id: string;
   name: string;
@@ -18,6 +26,7 @@ export type MonsterTemplateInput = Omit<MonsterTemplateDTO, "id">;
 
 export interface SpellTemplateDTO {
   id: string;
+  classId: string;
   keybind: number;
   name: string;
   kind: SpellKind;

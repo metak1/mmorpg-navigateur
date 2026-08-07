@@ -149,14 +149,23 @@ export class Hud {
     return this.casting !== null;
   }
 
-  // Mirrors the server: an interrupted cast never applies its cooldown, so
-  // roll the slot's cooldown-visual back as if it was never cast.
-  cancelCast() {
-    if (!this.casting) return;
-    const slot = this.slots.get(this.casting.spellId);
+  getCastingSpellId(): SpellId | null {
+    return this.casting?.spellId ?? null;
+  }
+
+  // Rolls a slot's cooldown-visual back as if it was never cast — used both
+  // when movement interrupts a channel (mirrors the server: an interrupted
+  // cast never applies its cooldown) and when the server reports a cast
+  // fizzled server-side (e.g. the target died before it landed; see
+  // WorldRoom.resolveCastEffect). The GCD is deliberately left untouched in
+  // both cases, matching the server.
+  cancelCast(spellId: SpellId) {
+    const slot = this.slots.get(spellId);
     if (slot) slot.lastCastAt = -Infinity;
-    this.casting = null;
-    this.setCastBarVisible(false);
+    if (this.casting?.spellId === spellId) {
+      this.casting = null;
+      this.setCastBarVisible(false);
+    }
   }
 
   beginCast(spellId: SpellId, spellName: string, nowMs: number) {
