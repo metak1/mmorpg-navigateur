@@ -5,7 +5,73 @@
     <title>mmorpg-navigateur</title>
     <style>
       html, body { margin: 0; background: #111; }
-      #app { display: flex; justify-content: center; align-items: center; height: 100vh; }
+
+      #game-layout {
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 16px;
+        height: 100vh;
+        padding: 16px;
+        box-sizing: border-box;
+      }
+
+      #app { flex: 0 0 auto; line-height: 0; }
+
+      /* One big panel that swaps content (chat by default). Height matches
+         the Phaser canvas (see VIEWPORT_HEIGHT in main.ts) so it lines up. */
+      #sidebar {
+        flex: 0 0 300px;
+        height: 700px;
+        display: flex;
+        flex-direction: column;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+
+      #sidebar-tabs {
+        display: flex;
+        gap: 4px;
+        padding: 8px;
+        border-bottom: 1px solid #333;
+      }
+      .sidebar-tab {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 6px 4px;
+        border-radius: 6px;
+        font-size: 12px;
+        color: #888;
+        cursor: pointer;
+        user-select: none;
+      }
+      .sidebar-tab:hover { background: #242424; color: #ccc; }
+      .sidebar-tab.active { background: #2a2a2a; color: #fff; }
+      .sidebar-tab kbd {
+        font-size: 10px;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: #000;
+        border: 1px solid #444;
+        color: #999;
+      }
+
+      #sidebar-body {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #555;
+        font-size: 13px;
+        padding: 12px;
+      }
 
       #login-overlay {
         position: fixed;
@@ -58,7 +124,17 @@
         <button type="submit">Play</button>
       </form>
     </div>
-    <div id="app"></div>
+    <div id="game-layout">
+      <div id="app"></div>
+      <aside id="sidebar">
+        <div id="sidebar-tabs">
+          <span class="sidebar-tab" data-panel="chat">Chat <kbd>C</kbd></span>
+          <span class="sidebar-tab" data-panel="inventory">Inventory <kbd>I</kbd></span>
+          <span class="sidebar-tab" data-panel="quests">Quest Log <kbd>L</kbd></span>
+        </div>
+        <div id="sidebar-body">Coming soon</div>
+      </aside>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

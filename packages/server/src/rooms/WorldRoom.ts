@@ -1,4 +1,4 @@
-import { Room, Client } from "@colyseus/core";
+import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import type { MonsterTemplate } from "@prisma/client";
 import {
@@ -14,9 +14,13 @@ import {
   MONSTER_RESPAWN_MS,
   PLAYER_MAX_HP,
   PLAYER_RESPAWN_INVULNERABLE_MS,
+  GLOBAL_COOLDOWN_MS,
   PROJECTILE_HIT_RADIUS,
   type TileGrid,
   type MoveInputMessage,
+  type CastInputMessage,
+  type HealEventMessage,
+  type GroundAoeEventMessage,
   type SpellId,
   type SpellDef,
   type SpellKind,
@@ -49,6 +53,9 @@ export class WorldRoom extends Room<RoomState> {
   static NAME = WORLD_ROOM;
   private inputs = new Map<string, MoveInputMessage>();
   private lastCastAt = new Map<string, number>();
+  private castingUntil = new Map<string, number>();
+  private castTimeouts = new Map<string, Delayed>();
+  private gcdUntil = new Map<string, number>();
   private invulnerableUntil = new Map<string, number>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
@@ -82,6 +89,7 @@ export class WorldRoom extends Room<RoomState> {
         name: spell.name,
         kind: spell.kind as SpellKind,
         cooldownMs: spell.cooldownMs,
+        castTimeMs: spell.castTimeMs,
         color: spell.color,
         size: spell.size,
         damage: spell.damage ?? undefined,
@@ -107,9 +115,7 @@ export class WorldRoom extends Room<RoomState> {
       this.inputs.set(client.sessionId, message);
     });
 
-    this.onMessage("cast", (client, message: { spellId: SpellId; dirX: number; dirY: number }) =>
-      this.handleCast(client, message),
-    );
+    this.onMessage("cast", (client, message: CastInputMessage) => this.handleCast(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
   }
@@ -117,6 +123,7 @@ export class WorldRoom extends Room<RoomState> {
   private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplate) {
     const monster = new Monster();
     monster.id = id;
+    monster.name = template.name;
     monster.x = spawn.x;
     monster.y = spawn.y;
     monster.hp = template.maxHp;
@@ -136,23 +143,77 @@ export class WorldRoom extends Room<RoomState> {
     });
   }
 
-  private handleCast(client: Client, message: { spellId: SpellId; dirX: number; dirY: number }) {
-    const player = this.state.players.get(client.sessionId);
+  private handleCast(client: Client, message: CastInputMessage) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
     const spell = this.spellDefs.get(message.spellId);
     if (!player || !spell) return;
 
-    const key = `${client.sessionId}:${message.spellId}`;
     const now = this.clock.currentTime;
+    if ((this.castingUntil.get(sessionId) ?? 0) > now) return; // already mid-cast
+    if ((this.gcdUntil.get(sessionId) ?? 0) > now) return; // global cooldown
+
+    const key = `${sessionId}:${message.spellId}`;
     const last = this.lastCastAt.get(key) ?? 0;
     if (now - last < spell.cooldownMs) return;
-    this.lastCastAt.set(key, now);
+
+    // The global cooldown always applies the moment a cast is accepted,
+    // regardless of this specific spell's own cooldown/cast-time outcome —
+    // unlike the per-spell cooldown, it is not waived if the cast is later
+    // interrupted (see interruptCast).
+    this.gcdUntil.set(sessionId, now + GLOBAL_COOLDOWN_MS);
+
+    if (spell.castTimeMs > 0) {
+      this.castingUntil.set(sessionId, now + spell.castTimeMs);
+      const timeout = this.clock.setTimeout(() => {
+        this.castingUntil.delete(sessionId);
+        this.castTimeouts.delete(sessionId);
+        // Cooldown only starts once the channel actually completes — an
+        // interrupted cast (see interruptCast) never reaches this line, so
+        // it doesn't cost anything.
+        this.lastCastAt.set(key, this.clock.currentTime);
+        this.resolveCastEffect(sessionId, spell, message);
+      }, spell.castTimeMs);
+      this.castTimeouts.set(sessionId, timeout);
+    } else {
+      this.lastCastAt.set(key, now);
+      this.resolveCastEffect(sessionId, spell, message);
+    }
+  }
+
+  // Moving during a channeled cast interrupts it before the cooldown is ever
+  // applied, so an interrupted cast is free to retry immediately.
+  private interruptCast(sessionId: string) {
+    this.castTimeouts.get(sessionId)?.clear();
+    this.castTimeouts.delete(sessionId);
+    this.castingUntil.delete(sessionId);
+  }
+
+  // Runs immediately for instant spells, or after the cast-time delay elapses
+  // for channeled ones. Re-reads player/target state at call time so a
+  // channeled cast reflects wherever things have moved to by the time it
+  // resolves, and quietly no-ops if the caster left or the target died.
+  private resolveCastEffect(sessionId: string, spell: SpellDef, message: CastInputMessage) {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
 
     if (spell.kind === "heal") {
       player.hp = Math.min(player.maxHp, player.hp + (spell.healAmount ?? 0));
+      this.broadcast("heal", { sessionId } satisfies HealEventMessage);
       return;
     }
 
-    const len = Math.hypot(message.dirX, message.dirY);
+    if (spell.kind === "groundAoe") {
+      this.resolveGroundAoe(player, spell, message);
+      return;
+    }
+
+    const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
+    if (!target) return;
+
+    const dirX = target.x - player.x;
+    const dirY = target.y - player.y;
+    const len = Math.hypot(dirX, dirY);
     if (len === 0) return;
 
     const id = `projectile-${this.projectileSeq++}`;
@@ -166,10 +227,45 @@ export class WorldRoom extends Room<RoomState> {
     this.projectileRuntime.set(id, {
       spawnX: player.x,
       spawnY: player.y,
-      dirX: message.dirX / len,
-      dirY: message.dirY / len,
+      dirX: dirX / len,
+      dirY: dirY / len,
       spellId: message.spellId,
     });
+  }
+
+  // Ground-targeted burst: damages every monster and heals every player
+  // within aoeRadius of the cast point, clamped to maxRange from the caster.
+  private resolveGroundAoe(player: Player, spell: SpellDef, message: CastInputMessage) {
+    if (message.x === undefined || message.y === undefined) return;
+
+    let targetX = message.x;
+    let targetY = message.y;
+    const dx = targetX - player.x;
+    const dy = targetY - player.y;
+    const dist = Math.hypot(dx, dy);
+    const maxRange = spell.maxRange ?? Infinity;
+    if (dist > maxRange && dist > 0) {
+      const scale = maxRange / dist;
+      targetX = player.x + dx * scale;
+      targetY = player.y + dy * scale;
+    }
+
+    const radius = spell.aoeRadius ?? 0;
+
+    for (const [id, monster] of this.state.monsters) {
+      if (Math.hypot(monster.x - targetX, monster.y - targetY) <= radius) {
+        this.damageMonster(id, monster, spell.damage ?? 0);
+      }
+    }
+
+    for (const [sessionId, ally] of this.state.players) {
+      if (Math.hypot(ally.x - targetX, ally.y - targetY) <= radius) {
+        ally.hp = Math.min(ally.maxHp, ally.hp + (spell.healAmount ?? 0));
+        this.broadcast("heal", { sessionId } satisfies HealEventMessage);
+      }
+    }
+
+    this.broadcast("groundAoe", { x: targetX, y: targetY, radius, color: spell.color } satisfies GroundAoeEventMessage);
   }
 
   private update(deltaTime: number) {
@@ -180,11 +276,15 @@ export class WorldRoom extends Room<RoomState> {
   }
 
   private updatePlayers(dt: number) {
+    const now = this.clock.currentTime;
     for (const [sessionId, input] of this.inputs) {
       const player = this.state.players.get(sessionId);
       if (!player) {
         this.inputs.delete(sessionId);
         continue;
+      }
+      if ((input.dx !== 0 || input.dy !== 0) && (this.castingUntil.get(sessionId) ?? 0) > now) {
+        this.interruptCast(sessionId);
       }
 
       const resolved = resolveMovement(
@@ -382,7 +482,9 @@ export class WorldRoom extends Room<RoomState> {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.invulnerableUntil.delete(client.sessionId);
-    for (let spellId = 1; spellId <= 5; spellId++) {
+    this.interruptCast(client.sessionId);
+    this.gcdUntil.delete(client.sessionId);
+    for (let spellId = 1; spellId <= 6; spellId++) {
       this.lastCastAt.delete(`${client.sessionId}:${spellId}`);
     }
 

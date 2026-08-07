@@ -2,6 +2,9 @@
 export const MONSTER_RESPAWN_MS = 5000;
 export const PLAYER_MAX_HP = 100;
 export const PLAYER_RESPAWN_INVULNERABLE_MS = 1000;
+// Shared cooldown applied across all spells whenever any spell is cast, on
+// top of that spell's own cooldown — prevents weaving instant spells together.
+export const GLOBAL_COOLDOWN_MS = 1000;
 
 // Everything below is seed data for prisma/seed.ts (the initial
 // MonsterTemplate + MonsterSpawn content) — the running game always loads

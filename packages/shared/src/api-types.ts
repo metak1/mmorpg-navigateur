@@ -22,6 +22,7 @@ export interface SpellTemplateDTO {
   name: string;
   kind: SpellKind;
   cooldownMs: number;
+  castTimeMs: number;
   color: number;
   size: number;
   damage: number | null;

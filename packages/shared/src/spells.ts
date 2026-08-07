@@ -1,22 +1,23 @@
-export type SpellId = 1 | 2 | 3 | 4 | 5;
-export type SpellKind = "single" | "aoe" | "heal" | "slow";
+export type SpellId = 1 | 2 | 3 | 4 | 5 | 6;
+export type SpellKind = "single" | "aoe" | "heal" | "slow" | "groundAoe";
 
 export interface SpellDef {
   name: string;
   kind: SpellKind;
   cooldownMs: number;
+  castTimeMs: number; // 0 = instant; otherwise a cast bar delays the effect
   color: number;
-  size: number; // projectile render size (px), unused for "heal"
+  size: number; // projectile render size (px), unused for "heal"/"groundAoe"
   // single / aoe / slow
   damage?: number;
   projectileSpeed?: number;
-  maxRange?: number;
-  // aoe only
+  maxRange?: number; // also used by groundAoe as the max cast distance from the caster
+  // aoe / groundAoe
   aoeRadius?: number;
   // slow only
   slowMultiplier?: number;
   slowDurationMs?: number;
-  // heal only
+  // heal / groundAoe
   healAmount?: number;
 }
 
@@ -27,6 +28,7 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     name: "Bolt",
     kind: "single",
     cooldownMs: 400,
+    castTimeMs: 0,
     color: 0xffee55,
     size: 6,
     damage: 15,
@@ -37,6 +39,7 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     name: "Nuke",
     kind: "single",
     cooldownMs: 2500,
+    castTimeMs: 800,
     color: 0xff5522,
     size: 12,
     damage: 60,
@@ -47,6 +50,7 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     name: "AOE Blast",
     kind: "aoe",
     cooldownMs: 3000,
+    castTimeMs: 600,
     color: 0xaa55ff,
     size: 10,
     damage: 25,
@@ -58,6 +62,7 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     name: "Heal",
     kind: "heal",
     cooldownMs: 4000,
+    castTimeMs: 1000,
     color: 0x55ff88,
     size: 0,
     healAmount: 40,
@@ -66,6 +71,7 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     name: "Root",
     kind: "slow",
     cooldownMs: 2000,
+    castTimeMs: 0,
     color: 0x55ddff,
     size: 8,
     damage: 5,
@@ -73,6 +79,18 @@ export const DEFAULT_SPELLS: Record<SpellId, SpellDef> = {
     maxRange: 400,
     slowMultiplier: 0.2,
     slowDurationMs: 3000,
+  },
+  6: {
+    name: "Rift",
+    kind: "groundAoe",
+    cooldownMs: 5000,
+    castTimeMs: 500,
+    color: 0x33ffee,
+    size: 0,
+    damage: 30,
+    healAmount: 25,
+    maxRange: 350,
+    aoeRadius: 90,
   },
 };
 

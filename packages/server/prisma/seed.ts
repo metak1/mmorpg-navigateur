@@ -43,6 +43,7 @@ async function main() {
         name: spell.name,
         kind: spell.kind,
         cooldownMs: spell.cooldownMs,
+        castTimeMs: spell.castTimeMs,
         color: spell.color,
         size: spell.size,
         damage: spell.damage ?? null,

@@ -7,7 +7,7 @@ const FIELDS: FieldSpec[] = [
     name: "keybind",
     label: "Keybind",
     type: "select",
-    options: [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: String(n) })),
+    options: [1, 2, 3, 4, 5, 6].map((n) => ({ value: String(n), label: String(n) })),
   },
   { name: "name", label: "Name", type: "text" },
   {
@@ -19,9 +19,11 @@ const FIELDS: FieldSpec[] = [
       { value: "aoe", label: "AOE" },
       { value: "heal", label: "Heal (self)" },
       { value: "slow", label: "Slow/Root" },
+      { value: "groundAoe", label: "Ground AOE (dmg enemies + heal allies)" },
     ],
   },
   { name: "cooldownMs", label: "Cooldown (ms)", type: "number" },
+  { name: "castTimeMs", label: "Cast Time (ms, 0 = instant)", type: "number" },
   { name: "color", label: "Color (hex, e.g. 0xffee55)", type: "text" },
   { name: "size", label: "Projectile Size (px)", type: "number" },
   { name: "damage", label: "Damage", type: "number" },
@@ -38,6 +40,7 @@ const DEFAULT_VALUES: Record<string, string | number> = {
   name: "New Spell",
   kind: "single",
   cooldownMs: 500,
+  castTimeMs: 0,
   color: "0xffee55",
   size: 6,
   damage: 15,
@@ -58,15 +61,16 @@ function toInput(values: Record<string, string>): SpellTemplateInput {
     name: values.name,
     kind,
     cooldownMs: Number(values.cooldownMs),
+    castTimeMs: Number(values.castTimeMs),
     color: Number(values.color),
     size: Number(values.size),
     damage: kind === "heal" ? null : num("damage"),
-    projectileSpeed: kind === "heal" ? null : num("projectileSpeed"),
+    projectileSpeed: kind === "heal" || kind === "groundAoe" ? null : num("projectileSpeed"),
     maxRange: kind === "heal" ? null : num("maxRange"),
-    aoeRadius: kind === "aoe" ? num("aoeRadius") : null,
+    aoeRadius: kind === "aoe" || kind === "groundAoe" ? num("aoeRadius") : null,
     slowMultiplier: kind === "slow" ? num("slowMultiplier") : null,
     slowDurationMs: kind === "slow" ? num("slowDurationMs") : null,
-    healAmount: kind === "heal" ? num("healAmount") : null,
+    healAmount: kind === "heal" || kind === "groundAoe" ? num("healAmount") : null,
   };
 }
 
@@ -80,12 +84,12 @@ function updateFieldVisibility(form: HTMLFormElement) {
   };
 
   setVisible("damage", kind !== "heal");
-  setVisible("projectileSpeed", kind !== "heal");
+  setVisible("projectileSpeed", kind !== "heal" && kind !== "groundAoe");
   setVisible("maxRange", kind !== "heal");
-  setVisible("aoeRadius", kind === "aoe");
+  setVisible("aoeRadius", kind === "aoe" || kind === "groundAoe");
   setVisible("slowMultiplier", kind === "slow");
   setVisible("slowDurationMs", kind === "slow");
-  setVisible("healAmount", kind === "heal");
+  setVisible("healAmount", kind === "heal" || kind === "groundAoe");
 }
 
 export async function renderSpellsPage(container: HTMLElement) {
@@ -150,6 +154,7 @@ export async function renderSpellsPage(container: HTMLElement) {
         { key: "name", label: "Name" },
         { key: "kind", label: "Kind" },
         { key: "cooldownMs", label: "Cooldown (ms)" },
+        { key: "castTimeMs", label: "Cast Time (ms)" },
         { key: "damage", label: "Damage" },
       ],
       list,
@@ -163,6 +168,7 @@ export async function renderSpellsPage(container: HTMLElement) {
               name: row.name,
               kind: row.kind,
               cooldownMs: row.cooldownMs,
+              castTimeMs: row.castTimeMs,
               color: `0x${row.color.toString(16)}`,
               size: row.size,
               damage: row.damage ?? "",

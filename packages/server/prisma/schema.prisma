@@ -41,6 +41,7 @@ model SpellTemplate {
   name            String
   kind            String
   cooldownMs      Int
+  castTimeMs      Int      @default(0)
   color           Int
   size            Float
   damage          Float?

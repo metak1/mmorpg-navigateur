@@ -2,6 +2,7 @@ import { Schema, type } from "@colyseus/schema";
 
 export class Monster extends Schema {
   @type("string") id: string = "";
+  @type("string") name: string = "";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") hp: number = 0;
