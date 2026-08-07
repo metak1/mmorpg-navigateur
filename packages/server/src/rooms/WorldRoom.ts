@@ -1,6 +1,7 @@
 import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
-import type { MonsterTemplate } from "@prisma/client";
+import { onContentChanged } from "../contentEvents.js";
+import type { MonsterTemplate, SpellTemplate } from "@prisma/client";
 import {
   Player,
   Monster,
@@ -74,6 +75,7 @@ export class WorldRoom extends Room<RoomState> {
   private spawnX = 0;
   private spawnY = 0;
   private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
+  private unsubscribeContentEvents?: () => void;
 
   async onCreate() {
     this.setState(new RoomState());
@@ -92,29 +94,12 @@ export class WorldRoom extends Room<RoomState> {
     this.spawnX = map.spawnX;
     this.spawnY = map.spawnY;
 
-    const spellRows = await prisma.spellTemplate.findMany();
-    for (const spell of spellRows) {
-      let classSpells = this.spellDefsByClass.get(spell.classId);
-      if (!classSpells) {
-        classSpells = new Map();
-        this.spellDefsByClass.set(spell.classId, classSpells);
-      }
-      classSpells.set(spell.keybind as SpellId, {
-        name: spell.name,
-        kind: spell.kind as SpellKind,
-        cooldownMs: spell.cooldownMs,
-        castTimeMs: spell.castTimeMs,
-        color: spell.color,
-        size: spell.size,
-        damage: spell.damage ?? undefined,
-        projectileSpeed: spell.projectileSpeed ?? undefined,
-        maxRange: spell.maxRange ?? undefined,
-        aoeRadius: spell.aoeRadius ?? undefined,
-        slowMultiplier: spell.slowMultiplier ?? undefined,
-        slowDurationMs: spell.slowDurationMs ?? undefined,
-        healAmount: spell.healAmount ?? undefined,
-      });
-    }
+    await this.reloadSpells();
+
+    this.unsubscribeContentEvents = onContentChanged((kind) => {
+      if (kind === "spells") void this.reloadSpells();
+      else if (kind === "monsters") void this.reloadMonsterTemplates();
+    });
 
     const spawnRows = await prisma.monsterSpawn.findMany({
       where: { mapId: map.id },
@@ -132,6 +117,69 @@ export class WorldRoom extends Room<RoomState> {
     this.onMessage("cast", (client, message: CastInputMessage) => this.handleCast(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
+  }
+
+  onDispose() {
+    this.unsubscribeContentEvents?.();
+  }
+
+  // Spells are cached at room creation for performance, so an admin edit
+  // wouldn't take effect until the next room otherwise. Rebuilding the whole
+  // map from scratch (rather than patching one row) means create/update/
+  // delete are all handled uniformly by the same reload.
+  private buildSpellDefsByClass(spellRows: SpellTemplate[]): Map<string, Map<SpellId, SpellDef>> {
+    const byClass = new Map<string, Map<SpellId, SpellDef>>();
+    for (const spell of spellRows) {
+      let classSpells = byClass.get(spell.classId);
+      if (!classSpells) {
+        classSpells = new Map();
+        byClass.set(spell.classId, classSpells);
+      }
+      classSpells.set(spell.keybind as SpellId, {
+        name: spell.name,
+        kind: spell.kind as SpellKind,
+        cooldownMs: spell.cooldownMs,
+        castTimeMs: spell.castTimeMs,
+        color: spell.color,
+        size: spell.size,
+        damage: spell.damage ?? undefined,
+        projectileSpeed: spell.projectileSpeed ?? undefined,
+        maxRange: spell.maxRange ?? undefined,
+        aoeRadius: spell.aoeRadius ?? undefined,
+        slowMultiplier: spell.slowMultiplier ?? undefined,
+        slowDurationMs: spell.slowDurationMs ?? undefined,
+        healAmount: spell.healAmount ?? undefined,
+      });
+    }
+    return byClass;
+  }
+
+  private async reloadSpells() {
+    const spellRows = await prisma.spellTemplate.findMany();
+    this.spellDefsByClass = this.buildSpellDefsByClass(spellRows);
+  }
+
+  // Monster templates are also cached (on each spawned monster's runtime
+  // entry). Mutating the existing template objects in place — rather than
+  // replacing them — means every already-spawned monster referencing one
+  // picks up the new stats immediately with no extra bookkeeping. Newly
+  // added/removed spawn points on the active map still require a room
+  // restart; this only refreshes stats on monsters that already exist.
+  private async reloadMonsterTemplates() {
+    const templates = await prisma.monsterTemplate.findMany();
+    const byId = new Map(templates.map((t) => [t.id, t]));
+
+    for (const runtime of this.monsterRuntime.values()) {
+      const fresh = byId.get(runtime.template.id);
+      if (fresh) Object.assign(runtime.template, fresh);
+    }
+
+    for (const [id, monster] of this.state.monsters) {
+      const runtime = this.monsterRuntime.get(id);
+      if (!runtime) continue;
+      monster.maxHp = runtime.template.maxHp;
+      monster.hp = Math.min(monster.hp, monster.maxHp);
+    }
   }
 
   private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplate) {

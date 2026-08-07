@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db.js";
 import { asyncRoute } from "./errors.js";
+import { requireAdmin } from "./adminAuth.js";
 import type { GameMapDTO, GameMapInput, ActiveMapResponse } from "shared";
 import type { GameMap, MonsterSpawn } from "@prisma/client";
 
@@ -73,6 +74,7 @@ mapsRouter.get(
 
 mapsRouter.post(
   "/",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     const body = req.body as GameMapInput;
     const map = await prisma.gameMap.create({
@@ -94,6 +96,7 @@ mapsRouter.post(
 
 mapsRouter.put(
   "/:id",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     const body = req.body as GameMapInput;
     const id = req.params.id as string;
@@ -122,6 +125,7 @@ mapsRouter.put(
 
 mapsRouter.delete(
   "/:id",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     await prisma.gameMap.delete({ where: { id: req.params.id as string } });
     res.status(204).end();
@@ -130,6 +134,7 @@ mapsRouter.delete(
 
 mapsRouter.post(
   "/:id/activate",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     const id = req.params.id as string;
     await prisma.$transaction([

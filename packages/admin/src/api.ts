@@ -8,14 +8,25 @@ import type {
   GameMapDTO,
   GameMapInput,
 } from "shared";
+import { getToken, clearToken } from "./auth.js";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:2567";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     ...options,
   });
+
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event("admin-unauthorized"));
+    throw new Error("Session expired — please log in again.");
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}) as { error?: string });

@@ -1,6 +1,6 @@
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import "dotenv/config";
+import pg from "pg";
+import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import {
   DEFAULT_MAP_DATA,
@@ -21,11 +21,8 @@ import {
   DEFAULT_MONSTER_SPAWNS,
 } from "shared";
 
-// Same path-resolution approach as src/db.ts: resolved relative to this file,
-// not process.cwd(), so `npx prisma db seed` and the running server always
-// agree on which dev.db they're touching.
-const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dev.db");
-const adapter = new PrismaBetterSqlite3({ url: dbPath });
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 interface SeedSpell {

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../db.js";
 import { asyncRoute } from "./errors.js";
+import { requireAdmin } from "./adminAuth.js";
 import type { ClassTemplateInput } from "shared";
 
 export const classesRouter = Router();
@@ -27,6 +28,7 @@ classesRouter.get(
 
 classesRouter.post(
   "/",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     const data = req.body as ClassTemplateInput;
     const cls = await prisma.classTemplate.create({ data });
@@ -36,6 +38,7 @@ classesRouter.post(
 
 classesRouter.put(
   "/:id",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     const data = req.body as ClassTemplateInput;
     const cls = await prisma.classTemplate.update({ where: { id: req.params.id as string }, data });
@@ -45,6 +48,7 @@ classesRouter.put(
 
 classesRouter.delete(
   "/:id",
+  requireAdmin,
   asyncRoute(async (req, res) => {
     await prisma.classTemplate.delete({ where: { id: req.params.id as string } });
     res.status(204).end();
