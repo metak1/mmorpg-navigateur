@@ -8,6 +8,16 @@ export interface ClassTemplateDTO {
 
 export type ClassTemplateInput = Omit<ClassTemplateDTO, "id">;
 
+export interface MonsterDropDTO {
+  id: string;
+  itemId: string;
+  dropChance: number;
+  minQuantity: number;
+  maxQuantity: number;
+}
+
+export type MonsterDropInput = Omit<MonsterDropDTO, "id">;
+
 export interface MonsterTemplateDTO {
   id: string;
   name: string;
@@ -23,9 +33,10 @@ export interface MonsterTemplateDTO {
   level: number;
   armor: number;
   xpReward: number;
+  drops: MonsterDropDTO[];
 }
 
-export type MonsterTemplateInput = Omit<MonsterTemplateDTO, "id">;
+export type MonsterTemplateInput = Omit<MonsterTemplateDTO, "id" | "drops"> & { drops: MonsterDropInput[] };
 
 export interface SpellTemplateDTO {
   id: string;

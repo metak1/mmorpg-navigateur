@@ -147,3 +147,9 @@ export interface InventoryStateMessage {
   items: InventoryItemView[];
   equipped: EquippedItemView[];
 }
+
+// Sent to the killing player only, once per monster death, listing every
+// loot-table entry that rolled successfully (may be empty).
+export interface LootDroppedMessage {
+  drops: Array<{ itemId: string; name: string; color: number; rarity: ItemRarity; quantity: number }>;
+}

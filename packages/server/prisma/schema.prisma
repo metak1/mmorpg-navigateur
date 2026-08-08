@@ -76,8 +76,25 @@ model MonsterTemplate {
   xpReward           Int      @default(20)
   spawns             MonsterSpawn[]
   quests             Quest[]
+  drops              MonsterDrop[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+// One entry in a monster's loot table. dropChance is a percent (0-100)
+// rolled independently per entry on kill, so a monster can drop several
+// entries (or none) from a single death rather than picking exactly one.
+model MonsterDrop {
+  id                String          @id @default(cuid())
+  monsterTemplateId String
+  monsterTemplate   MonsterTemplate @relation(fields: [monsterTemplateId], references: [id], onDelete: Cascade)
+  itemId            String
+  item              ItemTemplate    @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  dropChance        Float           @default(10)
+  minQuantity       Int             @default(1)
+  maxQuantity       Int             @default(1)
+
+  @@unique([monsterTemplateId, itemId])
 }
 
 model SpellTemplate {
@@ -210,6 +227,7 @@ model ItemTemplate {
   bringQuests         Quest[]              @relation("QuestBringItem")
   inventoryOf         CharacterItem[]
   equippedBy          CharacterEquipment[]
+  dropSources         MonsterDrop[]
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
 }

@@ -2,7 +2,7 @@ import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import { onContentChanged } from "../contentEvents.js";
 import { verifyToken } from "../auth/jwt.js";
-import type { MonsterTemplate, SpellTemplate, Quest, QuestRewardItem, ItemTemplate, NpcTemplate } from "@prisma/client";
+import type { MonsterTemplate, MonsterDrop, SpellTemplate, Quest, QuestRewardItem, ItemTemplate, NpcTemplate } from "@prisma/client";
 import {
   Player,
   Monster,
@@ -44,6 +44,7 @@ import {
   type UnequipItemMessage,
   type EquipActionFailedMessage,
   type InventoryStateMessage,
+  type LootDroppedMessage,
   type EquipmentSlot,
   type ItemSlotType,
   type ItemRarity,
@@ -56,6 +57,8 @@ import {
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const MONSTER_COLLISION_RADIUS = 14;
 
+type MonsterTemplateWithDrops = MonsterTemplate & { drops: MonsterDrop[] };
+
 interface MonsterRuntime {
   homeX: number;
   homeY: number;
@@ -65,7 +68,7 @@ interface MonsterRuntime {
   slowUntil: number;
   slowMultiplier: number;
   lastAttackAt: number;
-  template: MonsterTemplate;
+  template: MonsterTemplateWithDrops;
 }
 
 interface NpcRuntime {
@@ -177,7 +180,7 @@ export class WorldRoom extends Room<RoomState> {
 
     const spawnRows = await prisma.monsterSpawn.findMany({
       where: { mapId: map.id },
-      include: { monsterTemplate: true },
+      include: { monsterTemplate: { include: { drops: true } } },
     });
     spawnRows.forEach((spawn, index) => {
       this.spawnMonster(`monster-${index}`, { x: spawn.x, y: spawn.y }, spawn.monsterTemplate);
@@ -253,7 +256,7 @@ export class WorldRoom extends Room<RoomState> {
   // added/removed spawn points on the active map still require a room
   // restart; this only refreshes stats on monsters that already exist.
   private async reloadMonsterTemplates() {
-    const templates = await prisma.monsterTemplate.findMany();
+    const templates = await prisma.monsterTemplate.findMany({ include: { drops: true } });
     const byId = new Map(templates.map((t) => [t.id, t]));
 
     for (const runtime of this.monsterRuntime.values()) {
@@ -309,7 +312,7 @@ export class WorldRoom extends Room<RoomState> {
     this.npcRuntime.set(id, { npcTemplateId: template.id });
   }
 
-  private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplate) {
+  private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplateWithDrops) {
     const monster = new Monster();
     monster.id = id;
     monster.name = template.name;
@@ -612,6 +615,7 @@ export class WorldRoom extends Room<RoomState> {
         if (casterSessionId) {
           void this.grantXp(casterSessionId, runtime.template.xpReward);
           void this.trackMonsterKill(casterSessionId, runtime.template.id);
+          void this.grantDrops(casterSessionId, runtime.template);
         }
         this.clock.setTimeout(
           () => this.spawnMonster(id, { x: runtime.homeX, y: runtime.homeY }, runtime.template),
@@ -651,6 +655,52 @@ export class WorldRoom extends Room<RoomState> {
         console.error(`Failed to persist level-up for ${player.name}:`, err);
       }
     }
+  }
+
+  // Rolls a monster's loot table independently per entry (so a single kill
+  // can drop several things, or nothing) and grants whatever hits straight
+  // into the killer's inventory.
+  private async grantDrops(sessionId: string, template: MonsterTemplateWithDrops) {
+    if (template.drops.length === 0) return;
+    const characterId = this.characterIds.get(sessionId);
+    if (!characterId) return;
+
+    const rolled: { itemId: string; quantity: number }[] = [];
+    for (const drop of template.drops) {
+      if (Math.random() * 100 >= drop.dropChance) continue;
+      const span = drop.maxQuantity - drop.minQuantity;
+      const quantity = drop.minQuantity + (span > 0 ? Math.floor(Math.random() * (span + 1)) : 0);
+      if (quantity > 0) rolled.push({ itemId: drop.itemId, quantity });
+    }
+    if (rolled.length === 0) return;
+
+    await prisma.$transaction(
+      rolled.map((r) =>
+        prisma.characterItem.upsert({
+          where: { characterId_itemId: { characterId, itemId: r.itemId } },
+          update: { quantity: { increment: r.quantity } },
+          create: { characterId, itemId: r.itemId, quantity: r.quantity },
+        }),
+      ),
+    );
+
+    const client = this.clients.getById(sessionId);
+    if (!client) return;
+
+    const message: LootDroppedMessage = {
+      drops: rolled.map((r) => {
+        const item = this.itemTemplatesById.get(r.itemId);
+        return {
+          itemId: r.itemId,
+          name: item?.name ?? "Unknown item",
+          color: item?.color ?? 0xffffff,
+          rarity: (item?.rarity as ItemRarity) ?? "common",
+          quantity: r.quantity,
+        };
+      }),
+    };
+    client.send("lootDropped", message);
+    await this.sendInventoryState(client);
   }
 
   // Combat math (damage/heal scaling, armor mitigation) always reads through

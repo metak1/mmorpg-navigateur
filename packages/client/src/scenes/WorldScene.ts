@@ -17,6 +17,7 @@ import type {
   QuestCompletedMessage,
   InventoryStateMessage,
   EquipActionFailedMessage,
+  LootDroppedMessage,
 } from "shared";
 import { MOVE_SPEED, resolveMovement } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
@@ -37,6 +38,12 @@ const TARGET_PANEL_X = 8;
 const TARGET_PANEL_Y = 40;
 const TARGET_PANEL_WIDTH = 220;
 const TARGET_PANEL_HP_WIDTH = 200;
+const RARITY_TEXT_COLORS: Record<string, string> = {
+  common: "#cccccc",
+  rare: "#4d9fff",
+  epic: "#c060f0",
+  legendary: "#ff9d2e",
+};
 
 type Target = { kind: "monster"; id: string } | { kind: "self" };
 
@@ -245,6 +252,7 @@ export class WorldScene extends Phaser.Scene {
       alert(`Quest complete: ${msg.title}\n+${msg.rewardXp} XP${items ? `, ${items}` : ""}`);
     });
     room.onMessage("inventoryState", (msg: InventoryStateMessage) => sidebar.setInventory(msg));
+    room.onMessage("lootDropped", (msg: LootDroppedMessage) => this.playLootEffect(msg));
     room.onMessage("equipActionFailed", (msg: EquipActionFailedMessage) => alert(msg.reason));
     sidebar.setInventoryHandlers({
       onEquip: (itemId, slot) => room.send("equipItem", { itemId, slot }),
@@ -551,6 +559,33 @@ export class WorldScene extends Phaser.Scene {
       alpha: 0,
       duration: 400,
       onComplete: () => ring.destroy(),
+    });
+  }
+
+  // Floats one line of text per dropped item above the local player and
+  // fades it out — a quiet notification that doesn't interrupt play the way
+  // the questCompleted alert() does, since this can fire on every kill.
+  private playLootEffect(msg: LootDroppedMessage) {
+    const local = this.entities.get(this.room?.sessionId ?? "");
+    if (!local || msg.drops.length === 0) return;
+
+    msg.drops.forEach((drop, i) => {
+      const label = drop.quantity > 1 ? `+${drop.quantity}x ${drop.name}` : `+${drop.name}`;
+      const text = this.add
+        .text(local.rect.x, local.rect.y - HP_BAR_OFFSET_Y - 14 - i * 16, label, {
+          fontSize: "13px",
+          color: RARITY_TEXT_COLORS[drop.rarity] ?? "#ffffff",
+        })
+        .setOrigin(0.5, 1)
+        .setDepth(500);
+      this.tweens.add({
+        targets: text,
+        y: text.y - 24,
+        alpha: 0,
+        duration: 1200,
+        delay: i * 120,
+        onComplete: () => text.destroy(),
+      });
     });
   }
 
