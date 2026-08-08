@@ -65,12 +65,78 @@
       #sidebar-body {
         flex: 1;
         min-height: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        overflow-y: auto;
         color: #555;
         font-size: 13px;
         padding: 12px;
+      }
+
+      #quest-log-list { display: flex; flex-direction: column; gap: 10px; }
+      .quest-log-item {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      .quest-log-title { color: #fff; font-size: 13px; font-weight: 600; }
+      .quest-log-summary { color: #999; font-size: 12px; margin-top: 4px; }
+
+      #npc-dialogue-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: rgba(0, 0, 0, 0.5);
+        font-family: sans-serif;
+      }
+      #npc-dialogue-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 20px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        min-width: 320px;
+        max-width: 420px;
+      }
+      #npc-dialogue-panel h3 { margin: 0; color: #00ff88; font-size: 16px; }
+      .npc-dialogue-empty { color: #999; font-size: 13px; margin: 0; }
+      .npc-dialogue-option {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px;
+        background: #111;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+      }
+      .npc-dialogue-option-title { color: #fff; font-size: 14px; font-weight: 600; }
+      .npc-dialogue-option-desc { color: #aaa; font-size: 12px; }
+      .npc-dialogue-option-summary { color: #ffcc66; font-size: 12px; }
+      .npc-dialogue-hint { color: #666; font-size: 11px; font-style: italic; }
+      .npc-dialogue-option button {
+        align-self: flex-start;
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: none;
+        background: #00ff88;
+        color: #111;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      #npc-dialogue-close {
+        align-self: flex-end;
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: none;
+        color: #ccc;
+        cursor: pointer;
       }
 
       .auth-overlay {

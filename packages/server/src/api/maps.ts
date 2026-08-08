@@ -3,11 +3,11 @@ import { prisma } from "../db.js";
 import { asyncRoute } from "./errors.js";
 import { requireAdmin } from "./adminAuth.js";
 import type { GameMapDTO, GameMapInput, ActiveMapResponse } from "shared";
-import type { GameMap, MonsterSpawn } from "@prisma/client";
+import type { GameMap, MonsterSpawn, NpcSpawn } from "@prisma/client";
 
 export const mapsRouter = Router();
 
-function toDTO(map: GameMap & { spawns: MonsterSpawn[] }): GameMapDTO {
+function toDTO(map: GameMap & { spawns: MonsterSpawn[]; npcSpawns: NpcSpawn[] }): GameMapDTO {
   return {
     id: map.id,
     name: map.name,
@@ -25,13 +25,20 @@ function toDTO(map: GameMap & { spawns: MonsterSpawn[] }): GameMapDTO {
       x: s.x,
       y: s.y,
     })),
+    npcSpawns: map.npcSpawns.map((s) => ({
+      id: s.id,
+      mapId: s.mapId,
+      npcTemplateId: s.npcTemplateId,
+      x: s.x,
+      y: s.y,
+    })),
   };
 }
 
 mapsRouter.get(
   "/",
   asyncRoute(async (_req, res) => {
-    const maps = await prisma.gameMap.findMany({ include: { spawns: true }, orderBy: { name: "asc" } });
+    const maps = await prisma.gameMap.findMany({ include: { spawns: true, npcSpawns: true }, orderBy: { name: "asc" } });
     res.json(maps.map(toDTO));
   }),
 );
@@ -63,7 +70,7 @@ mapsRouter.get(
   "/:id",
   asyncRoute(async (req, res) => {
     const id = req.params.id as string;
-    const map = await prisma.gameMap.findUnique({ where: { id }, include: { spawns: true } });
+    const map = await prisma.gameMap.findUnique({ where: { id }, include: { spawns: true, npcSpawns: true } });
     if (!map) {
       res.status(404).json({ error: "Not found" });
       return;
@@ -87,8 +94,9 @@ mapsRouter.post(
         spawnX: body.spawnX,
         spawnY: body.spawnY,
         spawns: { create: body.spawns },
+        npcSpawns: { create: body.npcSpawns },
       },
-      include: { spawns: true },
+      include: { spawns: true, npcSpawns: true },
     });
     res.status(201).json(toDTO(map));
   }),
@@ -103,6 +111,7 @@ mapsRouter.put(
 
     const map = await prisma.$transaction(async (tx) => {
       await tx.monsterSpawn.deleteMany({ where: { mapId: id } });
+      await tx.npcSpawn.deleteMany({ where: { mapId: id } });
       return tx.gameMap.update({
         where: { id },
         data: {
@@ -114,8 +123,9 @@ mapsRouter.put(
           spawnX: body.spawnX,
           spawnY: body.spawnY,
           spawns: { create: body.spawns },
+          npcSpawns: { create: body.npcSpawns },
         },
-        include: { spawns: true },
+        include: { spawns: true, npcSpawns: true },
       });
     });
 

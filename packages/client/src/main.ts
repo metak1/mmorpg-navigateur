@@ -1,11 +1,9 @@
 import Phaser from "phaser";
 import { WorldScene } from "./scenes/WorldScene.js";
-import { Sidebar } from "./ui/Sidebar.js";
+import "./ui/Sidebar.js";
 import { fetchClasses, login, register, fetchMe, fetchCharacters, createCharacter } from "./net/api.js";
 import { getToken, setToken, clearToken } from "./net/auth.js";
 import { MAX_CHARACTERS_PER_ACCOUNT, type CharacterDTO } from "shared";
-
-new Sidebar();
 
 // Fixed regardless of the active map's actual size — the camera (see
 // WorldScene) follows the player and clamps to the map's bounds, so the

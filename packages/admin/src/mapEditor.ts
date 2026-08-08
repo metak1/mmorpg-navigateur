@@ -1,5 +1,5 @@
 import { TileType } from "shared";
-import type { GameMapDTO, GameMapInput, MonsterTemplateDTO } from "shared";
+import type { GameMapDTO, GameMapInput, MonsterTemplateDTO, NpcTemplateDTO } from "shared";
 
 const CELL_PX = 20;
 
@@ -15,12 +15,14 @@ export type EditableMap = Omit<GameMapDTO, "id" | "isActive"> & { id?: string };
 type Tool =
   | { kind: "tile"; tileType: number }
   | { kind: "player-spawn" }
-  | { kind: "monster-spawn"; monsterTemplateId: string };
+  | { kind: "monster-spawn"; monsterTemplateId: string }
+  | { kind: "npc-spawn"; npcTemplateId: string };
 
 export function renderMapEditor(
   container: HTMLElement,
   initialMap: EditableMap,
   monsters: MonsterTemplateDTO[],
+  npcs: NpcTemplateDTO[],
   onSave: (input: GameMapInput) => Promise<void>,
   onCancel: () => void,
 ): void {
@@ -36,6 +38,11 @@ export function renderMapEditor(
       col: Math.floor(s.x / initialMap.tileSize),
       row: Math.floor(s.y / initialMap.tileSize),
       monsterTemplateId: s.monsterTemplateId,
+    })),
+    npcSpawns: initialMap.npcSpawns.map((s) => ({
+      col: Math.floor(s.x / initialMap.tileSize),
+      row: Math.floor(s.y / initialMap.tileSize),
+      npcTemplateId: s.npcTemplateId,
     })),
   };
 
@@ -107,6 +114,21 @@ export function renderMapEditor(
   toolButtons.push(monsterSpawnBtn);
   toolbar.appendChild(monsterSpawnBtn);
 
+  const npcSelect = document.createElement("select");
+  for (const n of npcs) {
+    const opt = document.createElement("option");
+    opt.value = n.id;
+    opt.textContent = n.name;
+    npcSelect.appendChild(opt);
+  }
+  toolbar.appendChild(npcSelect);
+
+  const npcSpawnBtn = document.createElement("button");
+  npcSpawnBtn.textContent = "NPC Spawn (click to toggle)";
+  npcSpawnBtn.addEventListener("click", () => selectTool({ kind: "npc-spawn", npcTemplateId: npcSelect.value }, npcSpawnBtn));
+  toolButtons.push(npcSpawnBtn);
+  toolbar.appendChild(npcSpawnBtn);
+
   toolButtons[0]?.classList.add("active");
 
   const canvas = document.createElement("canvas");
@@ -115,8 +137,8 @@ export function renderMapEditor(
   canvas.className = "map-editor-canvas";
   const ctx = canvas.getContext("2d")!;
 
-  function monsterColorFor(id: string): string {
-    // stable-ish color per monster template so different types are visually
+  function colorFor(id: string): string {
+    // stable-ish color per template id so different types are visually
     // distinguishable on the grid without needing a full legend
     let hash = 0;
     for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
@@ -146,10 +168,18 @@ export function renderMapEditor(
     ctx.fill();
 
     for (const spawn of state.monsterSpawns) {
-      ctx.fillStyle = monsterColorFor(spawn.monsterTemplateId);
+      ctx.fillStyle = colorFor(spawn.monsterTemplateId);
       ctx.beginPath();
       ctx.arc(spawn.col * CELL_PX + CELL_PX / 2, spawn.row * CELL_PX + CELL_PX / 2, CELL_PX / 4, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // Squares (vs. monsters' circles) so the two spawn kinds are
+    // distinguishable on the grid without a separate legend.
+    for (const spawn of state.npcSpawns) {
+      ctx.fillStyle = colorFor(spawn.npcTemplateId);
+      const size = CELL_PX / 2;
+      ctx.fillRect(spawn.col * CELL_PX + (CELL_PX - size) / 2, spawn.row * CELL_PX + (CELL_PX - size) / 2, size, size);
     }
   }
 
@@ -175,6 +205,13 @@ export function renderMapEditor(
         state.monsterSpawns.splice(existingIndex, 1);
       } else {
         state.monsterSpawns.push({ col, row, monsterTemplateId: tool.monsterTemplateId });
+      }
+    } else if (tool.kind === "npc-spawn") {
+      const existingIndex = state.npcSpawns.findIndex((s) => s.col === col && s.row === row);
+      if (existingIndex >= 0) {
+        state.npcSpawns.splice(existingIndex, 1);
+      } else {
+        state.npcSpawns.push({ col, row, npcTemplateId: tool.npcTemplateId });
       }
     }
     draw();
@@ -212,6 +249,11 @@ export function renderMapEditor(
       spawnY: state.playerSpawnRow * state.tileSize + state.tileSize / 2,
       spawns: state.monsterSpawns.map((s) => ({
         monsterTemplateId: s.monsterTemplateId,
+        x: s.col * state.tileSize + state.tileSize / 2,
+        y: s.row * state.tileSize + state.tileSize / 2,
+      })),
+      npcSpawns: state.npcSpawns.map((s) => ({
+        npcTemplateId: s.npcTemplateId,
         x: s.col * state.tileSize + state.tileSize / 2,
         y: s.row * state.tileSize + state.tileSize / 2,
       })),

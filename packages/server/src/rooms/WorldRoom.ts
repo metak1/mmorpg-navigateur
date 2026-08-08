@@ -2,11 +2,13 @@ import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import { onContentChanged } from "../contentEvents.js";
 import { verifyToken } from "../auth/jwt.js";
-import type { MonsterTemplate, SpellTemplate } from "@prisma/client";
+import type { MonsterTemplate, SpellTemplate, Quest, QuestRewardItem, ItemTemplate, NpcTemplate } from "@prisma/client";
 import {
   Player,
   Monster,
   Projectile,
+  Npc,
+  QuestProgress,
   RoomState,
   WORLD_ROOM,
   MOVE_SPEED,
@@ -31,6 +33,13 @@ import {
   type HealEventMessage,
   type GroundAoeEventMessage,
   type CastFizzledMessage,
+  type TalkMessage,
+  type AcceptQuestMessage,
+  type TurnInQuestMessage,
+  type NpcDialogueMessage,
+  type NpcDialogueOption,
+  type QuestActionFailedMessage,
+  type QuestCompletedMessage,
   type SpellId,
   type SpellDef,
   type SpellKind,
@@ -51,6 +60,17 @@ interface MonsterRuntime {
   lastAttackAt: number;
   template: MonsterTemplate;
 }
+
+interface NpcRuntime {
+  npcTemplateId: string;
+}
+
+type QuestFull = Quest & {
+  targetNpc: NpcTemplate | null;
+  monsterTemplate: MonsterTemplate | null;
+  item: ItemTemplate | null;
+  rewardItems: (QuestRewardItem & { item: ItemTemplate })[];
+};
 
 interface ProjectileRuntime {
   spawnX: number;
@@ -80,6 +100,7 @@ export class WorldRoom extends Room<RoomState> {
   private characterIds = new Map<string, string>();
   private characterStats = new Map<string, CombatStats>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
+  private npcRuntime = new Map<string, NpcRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
   private projectileSeq = 0;
 
@@ -87,6 +108,12 @@ export class WorldRoom extends Room<RoomState> {
   private spawnX = 0;
   private spawnY = 0;
   private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
+  private questsById = new Map<string, QuestFull>();
+  private questsByGiverNpc = new Map<string, QuestFull[]>();
+  // Completed quest ids per session, so a finished quest is never re-offered
+  // — loaded from CharacterQuest at onJoin, alongside the active ones synced
+  // reactively via Player.quests.
+  private completedQuestIds = new Map<string, Set<string>>();
   private unsubscribeContentEvents?: () => void;
 
   async onCreate() {
@@ -107,10 +134,12 @@ export class WorldRoom extends Room<RoomState> {
     this.spawnY = map.spawnY;
 
     await this.reloadSpells();
+    await this.reloadQuests();
 
     this.unsubscribeContentEvents = onContentChanged((kind) => {
       if (kind === "spells") void this.reloadSpells();
       else if (kind === "monsters") void this.reloadMonsterTemplates();
+      else if (kind === "quests") void this.reloadQuests();
     });
 
     const spawnRows = await prisma.monsterSpawn.findMany({
@@ -121,12 +150,23 @@ export class WorldRoom extends Room<RoomState> {
       this.spawnMonster(`monster-${index}`, { x: spawn.x, y: spawn.y }, spawn.monsterTemplate);
     });
 
+    const npcSpawnRows = await prisma.npcSpawn.findMany({
+      where: { mapId: map.id },
+      include: { npcTemplate: true },
+    });
+    npcSpawnRows.forEach((spawn, index) => {
+      this.spawnNpc(`npc-${index}`, { x: spawn.x, y: spawn.y }, spawn.npcTemplate);
+    });
+
     this.onMessage("move", (client, message: MoveInputMessage) => {
       if (!this.state.players.has(client.sessionId)) return;
       this.inputs.set(client.sessionId, message);
     });
 
     this.onMessage("cast", (client, message: CastInputMessage) => this.handleCast(client, message));
+    this.onMessage("talk", (client, message: TalkMessage) => this.handleTalk(client, message));
+    this.onMessage("acceptQuest", (client, message: AcceptQuestMessage) => void this.handleAcceptQuest(client, message));
+    this.onMessage("turnInQuest", (client, message: TurnInQuestMessage) => void this.handleTurnInQuest(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
   }
@@ -193,6 +233,45 @@ export class WorldRoom extends Room<RoomState> {
       monster.hp = Math.min(monster.hp, monster.maxHp);
       monster.level = runtime.template.level;
     }
+  }
+
+  // Quests are cached at room creation for performance, same as spells —
+  // rebuilt from scratch on every "quests" content event so create/update/
+  // delete admin edits are all handled uniformly.
+  private async reloadQuests() {
+    const rows = await prisma.quest.findMany({
+      include: { targetNpc: true, monsterTemplate: true, item: true, rewardItems: { include: { item: true } } },
+    });
+
+    this.questsById = new Map(rows.map((q) => [q.id, q]));
+    this.questsByGiverNpc = new Map();
+    for (const quest of rows) {
+      const list = this.questsByGiverNpc.get(quest.giverNpcId) ?? [];
+      list.push(quest);
+      this.questsByGiverNpc.set(quest.giverNpcId, list);
+    }
+  }
+
+  private objectiveSummary(quest: QuestFull, progress: number): string {
+    switch (quest.objectiveType) {
+      case "talkToNpc":
+        return `Talk to ${quest.targetNpc?.name ?? "someone"}`;
+      case "killMonsters":
+        return `Kill ${quest.monsterTemplate?.name ?? "monsters"} (${progress}/${quest.requiredCount})`;
+      case "bringItems":
+        return `Bring ${quest.item?.name ?? "an item"} (${progress}/${quest.requiredCount})`;
+    }
+  }
+
+  private spawnNpc(id: string, spawn: { x: number; y: number }, template: NpcTemplate) {
+    const npc = new Npc();
+    npc.id = id;
+    npc.name = template.name;
+    npc.x = spawn.x;
+    npc.y = spawn.y;
+    npc.color = template.color;
+    this.state.npcs.set(id, npc);
+    this.npcRuntime.set(id, { npcTemplateId: template.id });
   }
 
   private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplate) {
@@ -495,7 +574,10 @@ export class WorldRoom extends Room<RoomState> {
     if (monster.hp <= 0) {
       this.state.monsters.delete(id);
       if (runtime) {
-        if (casterSessionId) void this.grantXp(casterSessionId, runtime.template.xpReward);
+        if (casterSessionId) {
+          void this.grantXp(casterSessionId, runtime.template.xpReward);
+          void this.trackMonsterKill(casterSessionId, runtime.template.id);
+        }
         this.clock.setTimeout(
           () => this.spawnMonster(id, { x: runtime.homeX, y: runtime.homeY }, runtime.template),
           MONSTER_RESPAWN_MS,
@@ -534,6 +616,247 @@ export class WorldRoom extends Room<RoomState> {
         console.error(`Failed to persist level-up for ${player.name}:`, err);
       }
     }
+  }
+
+  // Increments progress on any of this character's active killMonsters
+  // quests targeting the template that just died. Persisted immediately
+  // (rather than batched with onLeave) so a disconnect right after the kill
+  // can't lose it.
+  private async trackMonsterKill(sessionId: string, monsterTemplateId: string) {
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIds.get(sessionId);
+    if (!player || !characterId) return;
+
+    for (const entry of player.quests) {
+      const quest = this.questsById.get(entry.questId);
+      if (!quest || quest.objectiveType !== "killMonsters" || quest.monsterTemplateId !== monsterTemplateId) continue;
+      if (entry.progress >= entry.requiredCount) continue;
+
+      entry.progress += 1;
+      entry.ready = entry.progress >= entry.requiredCount;
+      entry.objectiveSummary = this.objectiveSummary(quest, entry.progress);
+
+      try {
+        await prisma.characterQuest.update({
+          where: { characterId_questId: { characterId, questId: quest.id } },
+          data: { progress: entry.progress },
+        });
+      } catch (err) {
+        console.error(`Failed to persist quest progress for ${player.name}:`, err);
+      }
+    }
+  }
+
+  // bringItems readiness can only change when the character's inventory
+  // changes, which (for now) only happens via quest rewards — so this is
+  // called after accept (a fresh quest might already be satisfiable) and
+  // after turn-in (the reward just granted might satisfy another).
+  private async refreshBringItemsReadiness(sessionId: string) {
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIds.get(sessionId);
+    if (!player || !characterId) return;
+
+    for (const entry of player.quests) {
+      const quest = this.questsById.get(entry.questId);
+      if (!quest || quest.objectiveType !== "bringItems" || !quest.itemId) continue;
+
+      const owned = await prisma.characterItem.findUnique({
+        where: { characterId_itemId: { characterId, itemId: quest.itemId } },
+      });
+      const quantity = owned?.quantity ?? 0;
+      entry.progress = Math.min(quantity, quest.requiredCount);
+      entry.ready = quantity >= quest.requiredCount;
+      entry.objectiveSummary = this.objectiveSummary(quest, entry.progress);
+    }
+  }
+
+  private findNpcTemplateId(npcEntityId: string): string | undefined {
+    return this.npcRuntime.get(npcEntityId)?.npcTemplateId;
+  }
+
+  private handleTalk(client: Client, message: TalkMessage) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    const npc = this.state.npcs.get(message.npcId);
+    const npcTemplateId = this.findNpcTemplateId(message.npcId);
+    if (!player || !npc || !npcTemplateId) return;
+
+    void this.buildAndSendDialogue(client, player, message.npcId, npc.name, npcTemplateId);
+  }
+
+  private async buildAndSendDialogue(
+    client: Client,
+    player: Player,
+    npcId: string,
+    npcName: string,
+    npcTemplateId: string,
+  ) {
+    const sessionId = client.sessionId;
+
+    // Talking to an NPC that's the *target* of an active talkToNpc quest
+    // (regardless of who gave it) satisfies that objective right away.
+    const characterId = this.characterIds.get(sessionId);
+    for (const entry of player.quests) {
+      const quest = this.questsById.get(entry.questId);
+      if (!quest || quest.objectiveType !== "talkToNpc" || quest.targetNpcId !== npcTemplateId) continue;
+      if (entry.ready) continue;
+
+      entry.progress = 1;
+      entry.ready = true;
+      entry.objectiveSummary = this.objectiveSummary(quest, 1);
+
+      if (!characterId) continue;
+      try {
+        await prisma.characterQuest.update({
+          where: { characterId_questId: { characterId, questId: quest.id } },
+          data: { progress: 1 },
+        });
+      } catch (err) {
+        console.error(`Failed to persist talk-objective progress for ${player.name}:`, err);
+      }
+    }
+
+    const completed = this.completedQuestIds.get(sessionId) ?? new Set<string>();
+    const activeQuestIds = new Set([...player.quests].map((e) => e.questId));
+
+    const options: NpcDialogueOption[] = [];
+
+    for (const entry of player.quests) {
+      const quest = this.questsById.get(entry.questId);
+      if (!quest || quest.giverNpcId !== npcTemplateId) continue;
+      options.push({
+        kind: entry.ready ? "turnIn" : "inProgress",
+        questId: quest.id,
+        title: quest.title,
+        description: quest.description,
+        objectiveSummary: entry.objectiveSummary,
+      });
+    }
+
+    const offerable = this.questsByGiverNpc.get(npcTemplateId) ?? [];
+    for (const quest of offerable) {
+      if (activeQuestIds.has(quest.id) || completed.has(quest.id)) continue;
+      options.push({
+        kind: "offer",
+        questId: quest.id,
+        title: quest.title,
+        description: quest.description,
+        objectiveSummary: this.objectiveSummary(quest, 0),
+      });
+    }
+
+    client.send("npcDialogue", { npcId, npcName, options } satisfies NpcDialogueMessage);
+  }
+
+  private async handleAcceptQuest(client: Client, message: AcceptQuestMessage) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIds.get(sessionId);
+    const quest = this.questsById.get(message.questId);
+    if (!player || !characterId || !quest) return;
+
+    const alreadyActive = [...player.quests].some((e) => e.questId === quest.id);
+    const alreadyCompleted = this.completedQuestIds.get(sessionId)?.has(quest.id);
+    if (alreadyActive || alreadyCompleted) {
+      client.send("questActionFailed", { questId: quest.id, reason: "You already have this quest." } satisfies QuestActionFailedMessage);
+      return;
+    }
+
+    try {
+      await prisma.characterQuest.create({ data: { characterId, questId: quest.id, status: "active", progress: 0 } });
+    } catch (err) {
+      console.error(`Failed to accept quest for ${player.name}:`, err);
+      client.send("questActionFailed", { questId: quest.id, reason: "Could not accept quest." } satisfies QuestActionFailedMessage);
+      return;
+    }
+
+    const entry = new QuestProgress();
+    entry.questId = quest.id;
+    entry.title = quest.title;
+    entry.requiredCount = quest.requiredCount;
+    entry.progress = 0;
+    entry.ready = false;
+    entry.objectiveSummary = this.objectiveSummary(quest, 0);
+    player.quests.push(entry);
+
+    if (quest.objectiveType === "bringItems") await this.refreshBringItemsReadiness(sessionId);
+  }
+
+  private async handleTurnInQuest(client: Client, message: TurnInQuestMessage) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    const characterId = this.characterIds.get(sessionId);
+    const quest = this.questsById.get(message.questId);
+    if (!player || !characterId || !quest) return;
+
+    const index = [...player.quests].findIndex((e) => e.questId === quest.id);
+    if (index === -1) return;
+    const entry = player.quests[index];
+
+    if (quest.objectiveType === "bringItems") await this.refreshBringItemsReadiness(sessionId);
+    if (!entry.ready) {
+      client.send("questActionFailed", { questId: quest.id, reason: "This quest isn't ready to turn in yet." } satisfies QuestActionFailedMessage);
+      return;
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        if (quest.objectiveType === "bringItems" && quest.itemId) {
+          const owned = await tx.characterItem.findUnique({
+            where: { characterId_itemId: { characterId, itemId: quest.itemId } },
+          });
+          if (!owned || owned.quantity < quest.requiredCount) {
+            throw new Error("insufficient-items");
+          }
+          if (owned.quantity === quest.requiredCount) {
+            await tx.characterItem.delete({ where: { id: owned.id } });
+          } else {
+            await tx.characterItem.update({ where: { id: owned.id }, data: { quantity: { decrement: quest.requiredCount } } });
+          }
+        }
+
+        for (const reward of quest.rewardItems) {
+          await tx.characterItem.upsert({
+            where: { characterId_itemId: { characterId, itemId: reward.itemId } },
+            update: { quantity: { increment: reward.quantity } },
+            create: { characterId, itemId: reward.itemId, quantity: reward.quantity },
+          });
+        }
+
+        await tx.characterQuest.update({
+          where: { characterId_questId: { characterId, questId: quest.id } },
+          data: { status: "completed" },
+        });
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "insufficient-items") {
+        client.send("questActionFailed", { questId: quest.id, reason: "You don't have the required items." } satisfies QuestActionFailedMessage);
+        return;
+      }
+      console.error(`Failed to turn in quest for ${player.name}:`, err);
+      client.send("questActionFailed", { questId: quest.id, reason: "Could not turn in quest." } satisfies QuestActionFailedMessage);
+      return;
+    }
+
+    player.quests.splice(index, 1);
+    let completed = this.completedQuestIds.get(sessionId);
+    if (!completed) {
+      completed = new Set();
+      this.completedQuestIds.set(sessionId, completed);
+    }
+    completed.add(quest.id);
+
+    if (quest.rewardXp > 0) void this.grantXp(sessionId, quest.rewardXp);
+
+    client.send("questCompleted", {
+      questId: quest.id,
+      title: quest.title,
+      rewardXp: quest.rewardXp,
+      rewardItems: quest.rewardItems.map((r) => ({ name: r.item.name, quantity: r.quantity })),
+    } satisfies QuestCompletedMessage);
+
+    // The reward just granted might satisfy another active bringItems quest.
+    await this.refreshBringItemsReadiness(sessionId);
   }
 
   private resolveSpellHit(
@@ -675,6 +998,31 @@ export class WorldRoom extends Room<RoomState> {
 
     this.state.players.set(client.sessionId, player);
     this.characterIds.set(client.sessionId, character.id);
+
+    const characterQuests = await prisma.characterQuest.findMany({ where: { characterId: character.id } });
+    const completed = new Set<string>();
+    for (const cq of characterQuests) {
+      if (cq.status === "completed") {
+        completed.add(cq.questId);
+        continue;
+      }
+      const quest = this.questsById.get(cq.questId);
+      if (!quest) continue; // quest was deleted from content since this was accepted
+
+      const entry = new QuestProgress();
+      entry.questId = quest.id;
+      entry.title = quest.title;
+      entry.requiredCount = quest.requiredCount;
+      entry.progress = cq.progress;
+      entry.ready = cq.progress >= quest.requiredCount;
+      entry.objectiveSummary = this.objectiveSummary(quest, cq.progress);
+      player.quests.push(entry);
+    }
+    this.completedQuestIds.set(client.sessionId, completed);
+    if (player.quests.some((e) => this.questsById.get(e.questId)?.objectiveType === "bringItems")) {
+      await this.refreshBringItemsReadiness(client.sessionId);
+    }
+
     console.log(`${player.name} (${player.className}) joined ${this.roomId}`);
   }
 
@@ -689,6 +1037,7 @@ export class WorldRoom extends Room<RoomState> {
     this.invulnerableUntil.delete(client.sessionId);
     this.interruptCast(client.sessionId);
     this.gcdUntil.delete(client.sessionId);
+    this.completedQuestIds.delete(client.sessionId);
     for (let spellId = 1; spellId <= 6; spellId++) {
       this.lastCastAt.delete(`${client.sessionId}:${spellId}`);
     }

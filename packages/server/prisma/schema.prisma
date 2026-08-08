@@ -27,23 +27,25 @@ model Account {
 // A character is the in-game identity (name, position, class) an account
 // plays as. One account can own several — the account is just the login.
 model Character {
-  id             String         @id @default(cuid())
+  id             String           @id @default(cuid())
   accountId      String
-  account        Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  name           String         @unique
+  account        Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name           String           @unique
   x              Float
   y              Float
   classId        String?
-  class          ClassTemplate? @relation(fields: [classId], references: [id])
-  level          Int            @default(1)
-  experience     Int            @default(0)
-  armor          Float          @default(0)
-  strength       Float          @default(0)
-  intelligence   Float          @default(0)
-  dexterity      Float          @default(0)
-  criticalChance Float          @default(5)
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  class          ClassTemplate?   @relation(fields: [classId], references: [id])
+  level          Int              @default(1)
+  experience     Int              @default(0)
+  armor          Float            @default(0)
+  strength       Float            @default(0)
+  intelligence   Float            @default(0)
+  dexterity      Float            @default(0)
+  criticalChance Float            @default(5)
+  items          CharacterItem[]
+  quests         CharacterQuest[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 }
 
 model ClassTemplate {
@@ -72,6 +74,7 @@ model MonsterTemplate {
   armor              Float    @default(0)
   xpReward           Int      @default(20)
   spawns             MonsterSpawn[]
+  quests             Quest[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -111,6 +114,7 @@ model GameMap {
   spawnY    Float
   isActive  Boolean  @default(false)
   spawns    MonsterSpawn[]
+  npcSpawns NpcSpawn[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -123,4 +127,117 @@ model MonsterSpawn {
   monsterTemplate   MonsterTemplate @relation(fields: [monsterTemplateId], references: [id], onDelete: Cascade)
   x                 Float
   y                 Float
+}
+
+// An NPC's "kind" (name/color) plus every quest it's involved in. Quests
+// reference the template, not a specific spawn, so the same NPC "type" can
+// appear on multiple maps and still give/require the same quests.
+model NpcTemplate {
+  id                String     @id @default(cuid())
+  name              String
+  color             Int
+  spawns            NpcSpawn[]
+  questsGiven       Quest[]    @relation("QuestGiver")
+  questTalkTargets  Quest[]    @relation("QuestTalkTarget")
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+}
+
+model NpcSpawn {
+  id            String      @id @default(cuid())
+  mapId         String
+  map           GameMap     @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  npcTemplateId String
+  npcTemplate   NpcTemplate @relation(fields: [npcTemplateId], references: [id], onDelete: Cascade)
+  x             Float
+  y             Float
+}
+
+model ItemTemplate {
+  id           String            @id @default(cuid())
+  name         String
+  description  String
+  color        Int
+  rewardOf     QuestRewardItem[]
+  bringQuests  Quest[]           @relation("QuestBringItem")
+  inventoryOf  CharacterItem[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+}
+
+model CharacterItem {
+  id          String       @id @default(cuid())
+  characterId String
+  character   Character    @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        ItemTemplate @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  quantity    Int          @default(1)
+
+  @@unique([characterId, itemId])
+}
+
+enum QuestObjectiveType {
+  talkToNpc
+  killMonsters
+  bringItems
+}
+
+// One objective per quest, following the same flat-table-with-nullable-
+// kind-specific-columns shape as SpellTemplate (kind + damage/healAmount/
+// aoeRadius etc) rather than a separate objective table — simpler to author
+// and query for a single-objective quest.
+model Quest {
+  id                String             @id @default(cuid())
+  title             String
+  description       String
+  giverNpcId        String
+  giverNpc          NpcTemplate        @relation("QuestGiver", fields: [giverNpcId], references: [id], onDelete: Cascade)
+  objectiveType     QuestObjectiveType
+  // talkToNpc
+  targetNpcId       String?
+  targetNpc         NpcTemplate?       @relation("QuestTalkTarget", fields: [targetNpcId], references: [id])
+  // killMonsters
+  monsterTemplateId String?
+  monsterTemplate   MonsterTemplate?   @relation(fields: [monsterTemplateId], references: [id])
+  // bringItems
+  itemId            String?
+  item              ItemTemplate?      @relation("QuestBringItem", fields: [itemId], references: [id])
+  // killMonsters / bringItems count target; unused (always 1, satisfied by
+  // the talk itself) for talkToNpc.
+  requiredCount     Int                @default(1)
+  rewardXp          Int                @default(0)
+  rewardItems       QuestRewardItem[]
+  characterQuests   CharacterQuest[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+}
+
+model QuestRewardItem {
+  id       String       @id @default(cuid())
+  questId  String
+  quest    Quest        @relation(fields: [questId], references: [id], onDelete: Cascade)
+  itemId   String
+  item     ItemTemplate @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  quantity Int          @default(1)
+}
+
+enum QuestStatus {
+  active
+  completed
+}
+
+model CharacterQuest {
+  id          String      @id @default(cuid())
+  characterId String
+  character   Character   @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  questId     String
+  quest       Quest       @relation(fields: [questId], references: [id], onDelete: Cascade)
+  status      QuestStatus @default(active)
+  // Current count toward requiredCount for killMonsters; unused (informational
+  // only) for talkToNpc/bringItems, which are checked directly at turn-in.
+  progress    Int         @default(0)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@unique([characterId, questId])
 }

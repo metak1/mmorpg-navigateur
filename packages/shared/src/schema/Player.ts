@@ -1,4 +1,5 @@
-import { Schema, type } from "@colyseus/schema";
+import { ArraySchema, Schema, type } from "@colyseus/schema";
+import { QuestProgress } from "./QuestProgress.js";
 
 export class Player extends Schema {
   @type("string") sessionId: string = "";
@@ -13,4 +14,5 @@ export class Player extends Schema {
   @type("number") level: number = 1;
   @type("number") experience: number = 0;
   @type("number") xpToNextLevel: number = 100;
+  @type([QuestProgress]) quests = new ArraySchema<QuestProgress>();
 }

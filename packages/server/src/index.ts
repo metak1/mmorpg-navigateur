@@ -11,6 +11,9 @@ import { mapsRouter } from "./api/maps.js";
 import { classesRouter } from "./api/classes.js";
 import { authRouter } from "./api/authRoutes.js";
 import { charactersRouter } from "./api/characters.js";
+import { npcsRouter } from "./api/npcs.js";
+import { itemsRouter } from "./api/items.js";
+import { questsRouter } from "./api/quests.js";
 
 const port = Number(process.env.PORT ?? 2567);
 // Bind all interfaces in production (most hosts route traffic to the
@@ -32,6 +35,9 @@ app.use("/api/maps", mapsRouter);
 app.use("/api/classes", classesRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/characters", charactersRouter);
+app.use("/api/npcs", npcsRouter);
+app.use("/api/items", itemsRouter);
+app.use("/api/quests", questsRouter);
 
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

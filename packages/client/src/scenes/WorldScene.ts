@@ -4,6 +4,7 @@ import type {
   Player,
   Monster,
   Projectile,
+  Npc,
   RoomState,
   SpellId,
   SpellDef,
@@ -11,11 +12,16 @@ import type {
   HealEventMessage,
   GroundAoeEventMessage,
   CastFizzledMessage,
+  NpcDialogueMessage,
+  QuestActionFailedMessage,
+  QuestCompletedMessage,
 } from "shared";
 import { MOVE_SPEED, resolveMovement } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
 import { fetchActiveMap, fetchSpells } from "../net/api.js";
 import { Hud } from "../ui/Hud.js";
+import { npcDialogue } from "../ui/NpcDialogue.js";
+import { sidebar } from "../ui/Sidebar.js";
 
 const REMOTE_SMOOTHING = 0.25; // lerp factor applied per frame toward server position
 const HP_BAR_WIDTH = 30;
@@ -62,6 +68,11 @@ interface ProjectileEntity {
   targetY: number;
 }
 
+interface NpcEntity {
+  rect: Phaser.GameObjects.Rectangle;
+  nameText: Phaser.GameObjects.Text;
+}
+
 // Physical key position (layout-independent), not Phaser's named keydown-*
 // events — those key off KeyboardEvent.keyCode, which on AZERTY and other
 // non-US layouts reports the *shifted* character's code for the number row
@@ -86,6 +97,7 @@ export class WorldScene extends Phaser.Scene {
   private room?: Room<RoomState>;
   private entities = new Map<string, PlayerEntity>();
   private monsters = new Map<string, MonsterEntity>();
+  private npcs = new Map<string, NpcEntity>();
   private projectiles = new Map<string, ProjectileEntity>();
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd?: Record<"W" | "A" | "S" | "D", Phaser.Input.Keyboard.Key>;
@@ -218,6 +230,18 @@ export class WorldScene extends Phaser.Scene {
     room.onMessage("heal", (msg: HealEventMessage) => this.playHealEffect(msg.sessionId));
     room.onMessage("groundAoe", (msg: GroundAoeEventMessage) => this.playGroundAoeEffect(msg));
     room.onMessage("castFizzled", (msg: CastFizzledMessage) => this.hud?.cancelCast(msg.spellId));
+    room.onMessage("npcDialogue", (msg: NpcDialogueMessage) => {
+      npcDialogue.show(msg, {
+        onAccept: (questId) => room.send("acceptQuest", { questId }),
+        onTurnIn: (questId) => room.send("turnInQuest", { questId }),
+      });
+    });
+    room.onMessage("questActionFailed", (msg: QuestActionFailedMessage) => alert(msg.reason));
+    room.onMessage("questCompleted", (msg: QuestCompletedMessage) => {
+      npcDialogue.hide();
+      const items = msg.rewardItems.map((i) => `${i.quantity}x ${i.name}`).join(", ");
+      alert(`Quest complete: ${msg.title}\n+${msg.rewardXp} XP${items ? `, ${items}` : ""}`);
+    });
 
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {
       const spellId = SPELL_KEY_CODES[event.code];
@@ -252,6 +276,24 @@ export class WorldScene extends Phaser.Scene {
         this.setupSpellbarForClass(player.classId, player.className);
         this.hud?.setHealth(player.hp, player.maxHp);
         this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
+
+        const syncQuestLog = () => {
+          sidebar.setQuests(
+            [...player.quests].map((q) => ({
+              questId: q.questId,
+              title: q.title,
+              objectiveSummary: q.objectiveSummary,
+              ready: q.ready,
+            })),
+          );
+        };
+        $(player).quests.onAdd((entry) => {
+          $(entry).onChange(syncQuestLog);
+          syncQuestLog();
+        });
+        $(player).quests.onRemove(syncQuestLog);
+        syncQuestLog();
+
         window.dispatchEvent(new CustomEvent("world-ready"));
       }
 
@@ -321,6 +363,31 @@ export class WorldScene extends Phaser.Scene {
       entity?.hpBarFill.destroy();
       this.monsters.delete(id);
       if (this.target?.kind === "monster" && this.target.id === id) this.setTarget(null);
+    });
+
+    $(room.state).npcs.onAdd((npc: Npc, id: string) => {
+      const rect = this.add.rectangle(npc.x, npc.y, 26, 26, npc.color);
+      rect.setInteractive({ useHandCursor: true });
+      rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
+        if (pointer.leftButtonDown()) this.room?.send("talk", { npcId: id });
+      });
+      const nameText = this.add
+        .text(npc.x, npc.y - 22, npc.name, {
+          fontSize: "11px",
+          color: "#ffffff",
+          backgroundColor: "#000000aa",
+          padding: { x: 3, y: 1 },
+        })
+        .setOrigin(0.5);
+      this.npcs.set(id, { rect, nameText });
+    });
+
+    $(room.state).npcs.onRemove((_npc: Npc, id: string) => {
+      const entity = this.npcs.get(id);
+      entity?.rect.destroy();
+      entity?.nameText.destroy();
+      this.npcs.delete(id);
     });
 
     $(room.state).projectiles.onAdd((projectile: Projectile, id: string) => {

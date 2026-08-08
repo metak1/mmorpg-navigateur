@@ -9,6 +9,12 @@ import type {
   GameMapInput,
   AccountDTO,
   AuthResponse,
+  NpcTemplateDTO,
+  NpcTemplateInput,
+  ItemTemplateDTO,
+  ItemTemplateInput,
+  QuestDTO,
+  QuestInput,
 } from "shared";
 import { getToken, clearToken } from "./auth.js";
 
@@ -87,4 +93,23 @@ export const api = {
     request<GameMapDTO>(`/api/maps/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteMap: (id: string) => request<void>(`/api/maps/${id}`, { method: "DELETE" }),
   activateMap: (id: string) => request<void>(`/api/maps/${id}/activate`, { method: "POST" }),
+
+  listNpcs: () => request<NpcTemplateDTO[]>("/api/npcs"),
+  createNpc: (data: NpcTemplateInput) => request<NpcTemplateDTO>("/api/npcs", { method: "POST", body: JSON.stringify(data) }),
+  updateNpc: (id: string, data: NpcTemplateInput) =>
+    request<NpcTemplateDTO>(`/api/npcs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteNpc: (id: string) => request<void>(`/api/npcs/${id}`, { method: "DELETE" }),
+
+  listItems: () => request<ItemTemplateDTO[]>("/api/items"),
+  createItem: (data: ItemTemplateInput) =>
+    request<ItemTemplateDTO>("/api/items", { method: "POST", body: JSON.stringify(data) }),
+  updateItem: (id: string, data: ItemTemplateInput) =>
+    request<ItemTemplateDTO>(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteItem: (id: string) => request<void>(`/api/items/${id}`, { method: "DELETE" }),
+
+  listQuests: () => request<QuestDTO[]>("/api/quests"),
+  createQuest: (data: QuestInput) => request<QuestDTO>("/api/quests", { method: "POST", body: JSON.stringify(data) }),
+  updateQuest: (id: string, data: QuestInput) =>
+    request<QuestDTO>(`/api/quests/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteQuest: (id: string) => request<void>(`/api/quests/${id}`, { method: "DELETE" }),
 };

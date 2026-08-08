@@ -58,6 +58,63 @@ export interface MonsterSpawnDTO {
 
 export type MonsterSpawnInput = Omit<MonsterSpawnDTO, "id" | "mapId">;
 
+export interface NpcTemplateDTO {
+  id: string;
+  name: string;
+  color: number;
+}
+
+export type NpcTemplateInput = Omit<NpcTemplateDTO, "id">;
+
+export interface NpcSpawnDTO {
+  id: string;
+  mapId: string;
+  npcTemplateId: string;
+  x: number;
+  y: number;
+}
+
+export type NpcSpawnInput = Omit<NpcSpawnDTO, "id" | "mapId">;
+
+export interface ItemTemplateDTO {
+  id: string;
+  name: string;
+  description: string;
+  color: number;
+}
+
+export type ItemTemplateInput = Omit<ItemTemplateDTO, "id">;
+
+export type QuestObjectiveType = "talkToNpc" | "killMonsters" | "bringItems";
+
+export interface QuestRewardItemDTO {
+  id: string;
+  itemId: string;
+  quantity: number;
+}
+
+export type QuestRewardItemInput = Omit<QuestRewardItemDTO, "id">;
+
+export interface QuestDTO {
+  id: string;
+  title: string;
+  description: string;
+  giverNpcId: string;
+  objectiveType: QuestObjectiveType;
+  // talkToNpc
+  targetNpcId: string | null;
+  // killMonsters
+  monsterTemplateId: string | null;
+  // killMonsters / bringItems
+  requiredCount: number;
+  // bringItems
+  itemId: string | null;
+  rewardXp: number;
+  rewardItems: QuestRewardItemDTO[];
+}
+
+export type QuestInput = Omit<QuestDTO, "id" | "rewardItems"> & { rewardItems: QuestRewardItemInput[] };
+
 export interface GameMapDTO {
   id: string;
   name: string;
@@ -69,10 +126,12 @@ export interface GameMapDTO {
   spawnY: number;
   isActive: boolean;
   spawns: MonsterSpawnDTO[];
+  npcSpawns: NpcSpawnDTO[];
 }
 
-export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns"> & {
+export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns"> & {
   spawns: MonsterSpawnInput[];
+  npcSpawns: NpcSpawnInput[];
 };
 
 export interface ActiveMapResponse {

@@ -43,6 +43,7 @@ export async function renderMapsPage(container: HTMLElement) {
         spawnX: Math.floor(width / 2) * tileSize + tileSize / 2,
         spawnY: Math.floor(height / 2) * tileSize + tileSize / 2,
         spawns: [],
+        npcSpawns: [],
       });
     });
 
@@ -103,12 +104,13 @@ export async function renderMapsPage(container: HTMLElement) {
     heading.textContent = map.id ? `Edit Map: ${map.name}` : "New Map";
     container.appendChild(heading);
 
-    const monsters = await api.listMonsters();
+    const [monsters, npcs] = await Promise.all([api.listMonsters(), api.listNpcs()]);
 
     renderMapEditor(
       container,
       map,
       monsters,
+      npcs,
       async (input: GameMapInput) => {
         try {
           if (map.id) {

@@ -54,3 +54,53 @@ export interface GroundAoeEventMessage {
 export interface CastFizzledMessage {
   spellId: SpellId;
 }
+
+// Client -> server: interact with an NPC (approaches it and clicks/presses
+// interact). The server replies with "npcDialogue" describing what that NPC
+// currently has to say to this character.
+export interface TalkMessage {
+  npcId: string;
+}
+
+export interface AcceptQuestMessage {
+  questId: string;
+}
+
+export interface TurnInQuestMessage {
+  questId: string;
+}
+
+export type NpcDialogueOptionKind = "offer" | "turnIn" | "inProgress";
+
+// One quest-shaped thing this NPC currently has to say: a new quest it can
+// give ("offer"), an active quest it gave that's ready to complete
+// ("turnIn"), or an active quest it gave that isn't ready yet ("inProgress",
+// shown so players know to come back later instead of nothing happening).
+export interface NpcDialogueOption {
+  kind: NpcDialogueOptionKind;
+  questId: string;
+  title: string;
+  description: string;
+  objectiveSummary: string;
+}
+
+export interface NpcDialogueMessage {
+  npcId: string;
+  npcName: string;
+  options: NpcDialogueOption[];
+}
+
+// Sent back to the requesting client only, when accept/turn-in is rejected
+// server-side (e.g. already have it, not actually ready yet) — the dialogue
+// UI shows the reason instead of silently doing nothing.
+export interface QuestActionFailedMessage {
+  questId: string;
+  reason: string;
+}
+
+export interface QuestCompletedMessage {
+  questId: string;
+  title: string;
+  rewardXp: number;
+  rewardItems: Array<{ name: string; quantity: number }>;
+}
