@@ -15,6 +15,8 @@ import type {
   NpcDialogueMessage,
   QuestActionFailedMessage,
   QuestCompletedMessage,
+  InventoryStateMessage,
+  EquipActionFailedMessage,
 } from "shared";
 import { MOVE_SPEED, resolveMovement } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
@@ -241,6 +243,12 @@ export class WorldScene extends Phaser.Scene {
       npcDialogue.hide();
       const items = msg.rewardItems.map((i) => `${i.quantity}x ${i.name}`).join(", ");
       alert(`Quest complete: ${msg.title}\n+${msg.rewardXp} XP${items ? `, ${items}` : ""}`);
+    });
+    room.onMessage("inventoryState", (msg: InventoryStateMessage) => sidebar.setInventory(msg));
+    room.onMessage("equipActionFailed", (msg: EquipActionFailedMessage) => alert(msg.reason));
+    sidebar.setInventoryHandlers({
+      onEquip: (itemId, slot) => room.send("equipItem", { itemId, slot }),
+      onUnequip: (slot) => room.send("unequipItem", { slot }),
     });
 
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {

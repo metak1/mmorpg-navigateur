@@ -1,4 +1,5 @@
 import type { SpellId } from "./spells.js";
+import type { EquipmentSlot, ItemRarity, ItemSlotType } from "./api-types.js";
 
 export const WORLD_ROOM = "world";
 export const MOVE_SPEED = 200; // px/sec
@@ -103,4 +104,46 @@ export interface QuestCompletedMessage {
   title: string;
   rewardXp: number;
   rewardItems: Array<{ name: string; quantity: number }>;
+}
+
+// Client -> server: equip an owned item into a specific concrete slot. The
+// slot must be compatible with the item's category (ring items -> ring1/
+// ring2, trinket items -> trinket1/trinket2, everything else maps 1:1).
+export interface EquipItemMessage {
+  itemId: string;
+  slot: EquipmentSlot;
+}
+
+export interface UnequipItemMessage {
+  slot: EquipmentSlot;
+}
+
+export interface EquipActionFailedMessage {
+  reason: string;
+}
+
+export interface InventoryItemView {
+  itemId: string;
+  name: string;
+  description: string;
+  color: number;
+  rarity: ItemRarity;
+  slotType: ItemSlotType | null;
+  quantity: number;
+}
+
+export interface EquippedItemView {
+  slot: EquipmentSlot;
+  itemId: string;
+  name: string;
+  color: number;
+  rarity: ItemRarity;
+}
+
+// Pushed to the owning client whenever their inventory or equipped loadout
+// changes (join, quest reward, equip, unequip) — private per-character data,
+// so it's request/response messaging rather than synced room state.
+export interface InventoryStateMessage {
+  items: InventoryItemView[];
+  equipped: EquippedItemView[];
 }

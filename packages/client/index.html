@@ -99,6 +99,72 @@
       .stats-label { color: #999; }
       .stats-value { color: #fff; font-weight: 600; }
 
+      /* Rarity accents, reused for both equipped slots and bag rows. */
+      .rarity-common { border-color: #555 !important; }
+      .rarity-rare { border-color: #4d9fff !important; }
+      .rarity-epic { border-color: #c060f0 !important; }
+      .rarity-legendary { border-color: #ff9d2e !important; }
+
+      #inventory-panel { display: flex; flex-direction: column; gap: 6px; }
+      #equipment-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        margin-bottom: 4px;
+      }
+      .equipment-slot {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        min-height: 48px;
+        padding: 4px;
+        border: 1px solid #333;
+        border-radius: 6px;
+        text-align: center;
+      }
+      .equipment-slot.empty { background: #161616; }
+      .equipment-slot.filled { background: #1f1f1f; cursor: pointer; }
+      .equipment-slot.filled:hover { background: #292929; }
+      .equipment-slot-label { color: #777; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .equipment-slot-item { color: #fff; font-size: 12px; font-weight: 600; }
+
+      #bag-header {
+        color: #999;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin: 10px 0 4px;
+        padding-top: 10px;
+        border-top: 1px solid #2a2a2a;
+      }
+      #bag-list { display: flex; flex-direction: column; gap: 8px; }
+      .bag-empty { color: #555; font-size: 12px; }
+      .bag-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      .bag-item-name { color: #fff; font-size: 13px; font-weight: 600; }
+      .bag-item-desc { color: #888; font-size: 11px; margin-top: 2px; }
+      .bag-item button {
+        flex-shrink: 0;
+        padding: 5px 10px;
+        font-size: 11px;
+        border-radius: 4px;
+        border: none;
+        background: #00ff88;
+        color: #111;
+        font-weight: bold;
+        cursor: pointer;
+      }
+
       #quest-log-list { display: flex; flex-direction: column; gap: 10px; }
       .quest-log-item {
         background: #1a1a1a;

@@ -44,6 +44,7 @@ model Character {
   criticalChance Float            @default(5)
   items          CharacterItem[]
   quests         CharacterQuest[]
+  equipment      CharacterEquipment[]
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 }
@@ -153,16 +154,64 @@ model NpcSpawn {
   y             Float
 }
 
+// The category an equippable item belongs to. Ring/trinket are categories,
+// not concrete slots — a character has two of each (see EquipmentSlot) and
+// either can hold an item of that category.
+enum ItemSlotType {
+  helmet
+  gloves
+  chest
+  spalders
+  boots
+  legs
+  amulet
+  ring
+  trinket
+}
+
+enum ItemRarity {
+  common
+  rare
+  epic
+  legendary
+}
+
+// The concrete, addressable slots on a character. ring1/ring2 both accept
+// ItemSlotType.ring items; trinket1/trinket2 both accept ItemSlotType.trinket.
+enum EquipmentSlot {
+  helmet
+  gloves
+  chest
+  spalders
+  boots
+  legs
+  amulet
+  ring1
+  ring2
+  trinket1
+  trinket2
+}
+
 model ItemTemplate {
-  id           String            @id @default(cuid())
-  name         String
-  description  String
-  color        Int
-  rewardOf     QuestRewardItem[]
-  bringQuests  Quest[]           @relation("QuestBringItem")
-  inventoryOf  CharacterItem[]
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  id                  String               @id @default(cuid())
+  name                String
+  description         String
+  color               Int
+  // null = not equippable (quest/misc items like "Widget").
+  slotType            ItemSlotType?
+  rarity              ItemRarity           @default(common)
+  bonusArmor          Float                @default(0)
+  bonusStrength       Float                @default(0)
+  bonusIntelligence   Float                @default(0)
+  bonusDexterity      Float                @default(0)
+  bonusCriticalChance Float                @default(0)
+  bonusHp             Float                @default(0)
+  rewardOf            QuestRewardItem[]
+  bringQuests         Quest[]              @relation("QuestBringItem")
+  inventoryOf         CharacterItem[]
+  equippedBy          CharacterEquipment[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
 }
 
 model CharacterItem {
@@ -174,6 +223,17 @@ model CharacterItem {
   quantity    Int          @default(1)
 
   @@unique([characterId, itemId])
+}
+
+model CharacterEquipment {
+  id          String        @id @default(cuid())
+  characterId String
+  character   Character     @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  slot        EquipmentSlot
+  itemId      String
+  item        ItemTemplate  @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([characterId, slot])
 }
 
 enum QuestObjectiveType {

@@ -1,4 +1,33 @@
+import { EQUIPMENT_SLOTS, type EquipmentSlot, type ItemSlotType, type InventoryStateMessage } from "shared";
+
 type PanelKey = "chat" | "inventory" | "quests" | "stats";
+
+const SLOT_LABELS: Record<EquipmentSlot, string> = {
+  helmet: "Helmet",
+  gloves: "Gloves",
+  chest: "Chest",
+  spalders: "Spalders",
+  boots: "Boots",
+  legs: "Legs",
+  amulet: "Amulet",
+  ring1: "Ring 1",
+  ring2: "Ring 2",
+  trinket1: "Trinket 1",
+  trinket2: "Trinket 2",
+};
+
+// Equipping a ring/trinket-category item doesn't ask which of the two slots
+// to use — it fills the first empty one, or replaces slot 1 if both are full.
+function pickTargetSlot(slotType: ItemSlotType, equippedSlots: ReadonlySet<EquipmentSlot>): EquipmentSlot {
+  if (slotType === "ring") return equippedSlots.has("ring1") ? "ring2" : "ring1";
+  if (slotType === "trinket") return equippedSlots.has("trinket1") ? "trinket2" : "trinket1";
+  return slotType;
+}
+
+export interface InventoryHandlers {
+  onEquip: (itemId: string, slot: EquipmentSlot) => void;
+  onUnequip: (slot: EquipmentSlot) => void;
+}
 
 const KEY_TO_PANEL: Record<string, PanelKey> = { c: "chat", i: "inventory", l: "quests", k: "stats" };
 const DEFAULT_PANEL: PanelKey = "chat";
@@ -59,6 +88,8 @@ export class Sidebar {
   private currentPanel: PanelKey = DEFAULT_PANEL;
   private quests: QuestLogEntry[] = [];
   private stats: CharacterStatsView | null = null;
+  private inventory: InventoryStateMessage | null = null;
+  private inventoryHandlers: InventoryHandlers | null = null;
 
   constructor() {
     this.bodyEl = document.querySelector<HTMLElement>("#sidebar-body")!;
@@ -94,6 +125,15 @@ export class Sidebar {
     if (this.currentPanel === "stats") this.render();
   }
 
+  setInventoryHandlers(handlers: InventoryHandlers) {
+    this.inventoryHandlers = handlers;
+  }
+
+  setInventory(inventory: InventoryStateMessage) {
+    this.inventory = inventory;
+    if (this.currentPanel === "inventory") this.render();
+  }
+
   private render() {
     this.bodyEl.innerHTML = "";
 
@@ -103,6 +143,10 @@ export class Sidebar {
     }
     if (this.currentPanel === "stats" && this.stats) {
       this.renderStats(this.stats);
+      return;
+    }
+    if (this.currentPanel === "inventory" && this.inventory) {
+      this.renderInventory(this.inventory);
       return;
     }
 
@@ -171,6 +215,85 @@ export class Sidebar {
     sheet.appendChild(statsList);
 
     this.bodyEl.appendChild(sheet);
+  }
+
+  private renderInventory(inventory: InventoryStateMessage) {
+    const wrapper = document.createElement("div");
+    wrapper.id = "inventory-panel";
+
+    const equippedBySlot = new Map(inventory.equipped.map((e) => [e.slot, e]));
+    const equippedSlots = new Set(inventory.equipped.map((e) => e.slot));
+
+    const grid = document.createElement("div");
+    grid.id = "equipment-grid";
+    for (const slot of EQUIPMENT_SLOTS) {
+      const box = document.createElement("div");
+      const equipped = equippedBySlot.get(slot);
+      box.className = `equipment-slot ${equipped ? `filled rarity-${equipped.rarity}` : "empty"}`;
+
+      const label = document.createElement("div");
+      label.className = "equipment-slot-label";
+      label.textContent = SLOT_LABELS[slot];
+      box.appendChild(label);
+
+      if (equipped) {
+        const name = document.createElement("div");
+        name.className = "equipment-slot-item";
+        name.textContent = equipped.name;
+        box.appendChild(name);
+        box.title = "Click to unequip";
+        box.addEventListener("click", () => this.inventoryHandlers?.onUnequip(slot));
+      }
+
+      grid.appendChild(box);
+    }
+    wrapper.appendChild(grid);
+
+    const bagHeader = document.createElement("div");
+    bagHeader.id = "bag-header";
+    bagHeader.textContent = "Bag";
+    wrapper.appendChild(bagHeader);
+
+    const bagList = document.createElement("div");
+    bagList.id = "bag-list";
+    if (inventory.items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "bag-empty";
+      empty.textContent = "Empty";
+      bagList.appendChild(empty);
+    }
+
+    for (const item of inventory.items) {
+      const row = document.createElement("div");
+      row.className = `bag-item rarity-${item.rarity}`;
+
+      const info = document.createElement("div");
+      info.className = "bag-item-info";
+      const name = document.createElement("div");
+      name.className = "bag-item-name";
+      name.textContent = item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name;
+      const desc = document.createElement("div");
+      desc.className = "bag-item-desc";
+      desc.textContent = item.description;
+      info.append(name, desc);
+      row.appendChild(info);
+
+      if (item.slotType) {
+        const slotType = item.slotType;
+        const button = document.createElement("button");
+        button.textContent = "Equip";
+        button.addEventListener("click", () => {
+          const slot = pickTargetSlot(slotType, equippedSlots);
+          this.inventoryHandlers?.onEquip(item.itemId, slot);
+        });
+        row.appendChild(button);
+      }
+
+      bagList.appendChild(row);
+    }
+    wrapper.appendChild(bagList);
+
+    this.bodyEl.appendChild(wrapper);
   }
 }
 

@@ -40,6 +40,13 @@ import {
   type NpcDialogueOption,
   type QuestActionFailedMessage,
   type QuestCompletedMessage,
+  type EquipItemMessage,
+  type UnequipItemMessage,
+  type EquipActionFailedMessage,
+  type InventoryStateMessage,
+  type EquipmentSlot,
+  type ItemSlotType,
+  type ItemRarity,
   type SpellId,
   type SpellDef,
   type SpellKind,
@@ -64,6 +71,24 @@ interface MonsterRuntime {
 interface NpcRuntime {
   npcTemplateId: string;
 }
+
+interface EquipmentBonusTotals {
+  armor: number;
+  strength: number;
+  intelligence: number;
+  dexterity: number;
+  criticalChance: number;
+  hp: number;
+}
+
+const EMPTY_EQUIPMENT_BONUS: EquipmentBonusTotals = {
+  armor: 0,
+  strength: 0,
+  intelligence: 0,
+  dexterity: 0,
+  criticalChance: 0,
+  hp: 0,
+};
 
 type QuestFull = Quest & {
   targetNpc: NpcTemplate | null;
@@ -114,6 +139,11 @@ export class WorldRoom extends Room<RoomState> {
   // — loaded from CharacterQuest at onJoin, alongside the active ones synced
   // reactively via Player.quests.
   private completedQuestIds = new Map<string, Set<string>>();
+  // Item templates aren't hot-reloaded (unlike spells/monsters/quests) — an
+  // admin edit to an item's bonuses applies the next time it's equipped or a
+  // character rejoins, not to a live session. Loaded once at room creation.
+  private itemTemplatesById = new Map<string, ItemTemplate>();
+  private equipmentBonus = new Map<string, EquipmentBonusTotals>();
   private unsubscribeContentEvents?: () => void;
 
   async onCreate() {
@@ -135,6 +165,9 @@ export class WorldRoom extends Room<RoomState> {
 
     await this.reloadSpells();
     await this.reloadQuests();
+
+    const itemRows = await prisma.itemTemplate.findMany();
+    this.itemTemplatesById = new Map(itemRows.map((item) => [item.id, item]));
 
     this.unsubscribeContentEvents = onContentChanged((kind) => {
       if (kind === "spells") void this.reloadSpells();
@@ -167,6 +200,8 @@ export class WorldRoom extends Room<RoomState> {
     this.onMessage("talk", (client, message: TalkMessage) => this.handleTalk(client, message));
     this.onMessage("acceptQuest", (client, message: AcceptQuestMessage) => void this.handleAcceptQuest(client, message));
     this.onMessage("turnInQuest", (client, message: TurnInQuestMessage) => void this.handleTurnInQuest(client, message));
+    this.onMessage("equipItem", (client, message: EquipItemMessage) => void this.handleEquipItem(client, message));
+    this.onMessage("unequipItem", (client, message: UnequipItemMessage) => void this.handleUnequipItem(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
   }
@@ -548,7 +583,7 @@ export class WorldRoom extends Room<RoomState> {
   // has already left (their entry in characterStats is gone) — a projectile
   // in flight can still land after its caster disconnects.
   private rollForCaster(casterSessionId: string, className: string, base: number): number {
-    const stats = this.characterStats.get(casterSessionId);
+    const stats = this.getEffectiveStats(casterSessionId);
     if (!stats) return base;
     return rollMagnitude(base, className, stats).amount;
   }
@@ -558,7 +593,7 @@ export class WorldRoom extends Room<RoomState> {
     const invulnUntil = this.invulnerableUntil.get(player.sessionId) ?? 0;
     if (now < invulnUntil) return;
 
-    const armor = this.characterStats.get(player.sessionId)?.armor ?? 0;
+    const armor = this.getEffectiveStats(player.sessionId)?.armor ?? 0;
     player.hp -= applyArmor(amount, armor);
     if (player.hp <= 0) {
       player.hp = player.maxHp;
@@ -597,20 +632,16 @@ export class WorldRoom extends Room<RoomState> {
     const characterId = this.characterIds.get(sessionId);
     if (!player || !stats || !characterId) return;
 
-    const { stats: updated, hpGained, leveledUp } = grantExperience(player.className, stats, xpAmount);
+    const { stats: updated, leveledUp } = grantExperience(player.className, stats, xpAmount);
     this.characterStats.set(sessionId, updated);
 
     player.level = updated.level;
     player.experience = updated.experience;
     player.xpToNextLevel = xpToNextLevel(updated.level);
-    player.armor = updated.armor;
-    player.strength = updated.strength;
-    player.intelligence = updated.intelligence;
-    player.dexterity = updated.dexterity;
-    if (hpGained > 0) {
-      player.maxHp += hpGained;
-      player.hp += hpGained;
-    }
+    // Recomputes maxHp from the new level (plus equipment bonus) and
+    // adjusts current hp by whatever that maxHp delta turns out to be —
+    // same formula a level-up used to apply manually via hpGained.
+    this.applyStatsToPlayer(sessionId);
 
     if (leveledUp) {
       console.log(`${player.name} leveled up to ${updated.level}`);
@@ -620,6 +651,192 @@ export class WorldRoom extends Room<RoomState> {
         console.error(`Failed to persist level-up for ${player.name}:`, err);
       }
     }
+  }
+
+  // Combat math (damage/heal scaling, armor mitigation) always reads through
+  // here rather than characterStats directly, so equipped gear actually
+  // matters in a fight — characterStats stays the "base" block that persists
+  // to the Character row and grows on level-up, unaffected by what's equipped.
+  private getEffectiveStats(sessionId: string): CombatStats | undefined {
+    const base = this.characterStats.get(sessionId);
+    if (!base) return undefined;
+    const bonus = this.equipmentBonus.get(sessionId) ?? EMPTY_EQUIPMENT_BONUS;
+    return {
+      level: base.level,
+      experience: base.experience,
+      armor: base.armor + bonus.armor,
+      strength: base.strength + bonus.strength,
+      intelligence: base.intelligence + bonus.intelligence,
+      dexterity: base.dexterity + bonus.dexterity,
+      criticalChance: base.criticalChance + bonus.criticalChance,
+    };
+  }
+
+  // The one place maxHp/armor/strength/intelligence/dexterity/criticalChance
+  // are derived onto the synced Player fields — called on join, level-up, and
+  // equip/unequip, so those three call sites can never drift out of sync.
+  // maxHp changes are applied as a delta to current hp (same treatment a
+  // level-up's HP gain always got), not a hard reset, so mid-fight HP isn't
+  // clobbered by, say, unequipping a ring.
+  private applyStatsToPlayer(sessionId: string) {
+    const player = this.state.players.get(sessionId);
+    const base = this.characterStats.get(sessionId);
+    if (!player || !base) return;
+    const bonus = this.equipmentBonus.get(sessionId) ?? EMPTY_EQUIPMENT_BONUS;
+
+    const newMaxHp = PLAYER_MAX_HP + (base.level - 1) * HP_PER_LEVEL + bonus.hp;
+    const delta = newMaxHp - player.maxHp;
+    player.maxHp = newMaxHp;
+    player.hp = Math.max(0, Math.min(newMaxHp, player.hp + delta));
+
+    player.armor = base.armor + bonus.armor;
+    player.strength = base.strength + bonus.strength;
+    player.intelligence = base.intelligence + bonus.intelligence;
+    player.dexterity = base.dexterity + bonus.dexterity;
+    player.criticalChance = base.criticalChance + bonus.criticalChance;
+  }
+
+  private async loadEquipmentBonus(sessionId: string, characterId: string) {
+    const rows = await prisma.characterEquipment.findMany({ where: { characterId }, include: { item: true } });
+    const bonus: EquipmentBonusTotals = { ...EMPTY_EQUIPMENT_BONUS };
+    for (const row of rows) {
+      bonus.armor += row.item.bonusArmor;
+      bonus.strength += row.item.bonusStrength;
+      bonus.intelligence += row.item.bonusIntelligence;
+      bonus.dexterity += row.item.bonusDexterity;
+      bonus.criticalChance += row.item.bonusCriticalChance;
+      bonus.hp += row.item.bonusHp;
+    }
+    this.equipmentBonus.set(sessionId, bonus);
+  }
+
+  // Inventory/equipment are private per-character data with no need for
+  // other clients to see them, so they're pushed on demand (join, quest
+  // reward, equip, unequip) rather than synced via room state.
+  private async sendInventoryState(client: Client) {
+    const characterId = this.characterIds.get(client.sessionId);
+    if (!characterId) return;
+
+    const [items, equipped] = await Promise.all([
+      prisma.characterItem.findMany({ where: { characterId }, include: { item: true } }),
+      prisma.characterEquipment.findMany({ where: { characterId }, include: { item: true } }),
+    ]);
+
+    const message: InventoryStateMessage = {
+      items: items.map((row) => ({
+        itemId: row.itemId,
+        name: row.item.name,
+        description: row.item.description,
+        color: row.item.color,
+        rarity: row.item.rarity as ItemRarity,
+        slotType: row.item.slotType as ItemSlotType | null,
+        quantity: row.quantity,
+      })),
+      equipped: equipped.map((row) => ({
+        slot: row.slot as EquipmentSlot,
+        itemId: row.itemId,
+        name: row.item.name,
+        color: row.item.color,
+        rarity: row.item.rarity as ItemRarity,
+      })),
+    };
+    client.send("inventoryState", message);
+  }
+
+  private slotMatchesCategory(slot: EquipmentSlot, slotType: ItemSlotType): boolean {
+    if (slotType === "ring") return slot === "ring1" || slot === "ring2";
+    if (slotType === "trinket") return slot === "trinket1" || slot === "trinket2";
+    return slot === slotType;
+  }
+
+  private async handleEquipItem(client: Client, message: EquipItemMessage) {
+    const sessionId = client.sessionId;
+    const characterId = this.characterIds.get(sessionId);
+    if (!characterId) return;
+
+    const item = this.itemTemplatesById.get(message.itemId);
+    if (!item || !item.slotType || !this.slotMatchesCategory(message.slot, item.slotType as ItemSlotType)) {
+      client.send("equipActionFailed", { reason: "That item can't go there." } satisfies EquipActionFailedMessage);
+      return;
+    }
+
+    const owned = await prisma.characterItem.findUnique({
+      where: { characterId_itemId: { characterId, itemId: item.id } },
+    });
+    if (!owned || owned.quantity < 1) {
+      client.send("equipActionFailed", { reason: "You don't have that item." } satisfies EquipActionFailedMessage);
+      return;
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        if (owned.quantity === 1) {
+          await tx.characterItem.delete({ where: { id: owned.id } });
+        } else {
+          await tx.characterItem.update({ where: { id: owned.id }, data: { quantity: { decrement: 1 } } });
+        }
+
+        // Whatever was already in that slot goes back to the bag — equipping
+        // is a swap, not a discard.
+        const existing = await tx.characterEquipment.findUnique({
+          where: { characterId_slot: { characterId, slot: message.slot } },
+        });
+        if (existing) {
+          await tx.characterItem.upsert({
+            where: { characterId_itemId: { characterId, itemId: existing.itemId } },
+            update: { quantity: { increment: 1 } },
+            create: { characterId, itemId: existing.itemId, quantity: 1 },
+          });
+        }
+
+        await tx.characterEquipment.upsert({
+          where: { characterId_slot: { characterId, slot: message.slot } },
+          update: { itemId: item.id },
+          create: { characterId, slot: message.slot, itemId: item.id },
+        });
+      });
+    } catch (err) {
+      console.error(`Failed to equip item for session ${sessionId}:`, err);
+      client.send("equipActionFailed", { reason: "Could not equip item." } satisfies EquipActionFailedMessage);
+      return;
+    }
+
+    await this.loadEquipmentBonus(sessionId, characterId);
+    this.applyStatsToPlayer(sessionId);
+    await this.sendInventoryState(client);
+  }
+
+  private async handleUnequipItem(client: Client, message: UnequipItemMessage) {
+    const sessionId = client.sessionId;
+    const characterId = this.characterIds.get(sessionId);
+    if (!characterId) return;
+
+    const existing = await prisma.characterEquipment.findUnique({
+      where: { characterId_slot: { characterId, slot: message.slot } },
+    });
+    if (!existing) {
+      client.send("equipActionFailed", { reason: "Nothing equipped there." } satisfies EquipActionFailedMessage);
+      return;
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.characterEquipment.delete({ where: { id: existing.id } });
+        await tx.characterItem.upsert({
+          where: { characterId_itemId: { characterId, itemId: existing.itemId } },
+          update: { quantity: { increment: 1 } },
+          create: { characterId, itemId: existing.itemId, quantity: 1 },
+        });
+      });
+    } catch (err) {
+      console.error(`Failed to unequip item for session ${sessionId}:`, err);
+      client.send("equipActionFailed", { reason: "Could not unequip item." } satisfies EquipActionFailedMessage);
+      return;
+    }
+
+    await this.loadEquipmentBonus(sessionId, characterId);
+    this.applyStatsToPlayer(sessionId);
+    await this.sendInventoryState(client);
   }
 
   // Increments progress on any of this character's active killMonsters
@@ -861,6 +1078,7 @@ export class WorldRoom extends Room<RoomState> {
 
     // The reward just granted might satisfy another active bringItems quest.
     await this.refreshBringItemsReadiness(sessionId);
+    await this.sendInventoryState(client);
   }
 
   private resolveSpellHit(
@@ -986,27 +1204,26 @@ export class WorldRoom extends Room<RoomState> {
       criticalChance: character.criticalChance,
     };
     this.characterStats.set(client.sessionId, stats);
+    this.characterIds.set(client.sessionId, character.id);
+    await this.loadEquipmentBonus(client.sessionId, character.id);
 
     const player = new Player();
     player.sessionId = client.sessionId;
     player.name = character.name;
     player.x = character.x;
     player.y = character.y;
-    player.maxHp = PLAYER_MAX_HP + (character.level - 1) * HP_PER_LEVEL;
-    player.hp = player.maxHp;
     player.classId = character.class.id;
     player.className = character.class.name;
     player.level = character.level;
     player.experience = character.experience;
     player.xpToNextLevel = xpToNextLevel(character.level);
-    player.armor = character.armor;
-    player.strength = character.strength;
-    player.intelligence = character.intelligence;
-    player.dexterity = character.dexterity;
-    player.criticalChance = character.criticalChance;
 
     this.state.players.set(client.sessionId, player);
-    this.characterIds.set(client.sessionId, character.id);
+    // Derives maxHp/hp and armor/strength/intelligence/dexterity/critChance
+    // from characterStats + equipmentBonus — the one place that formula
+    // lives, so join, level-up, and equip/unequip can never disagree.
+    this.applyStatsToPlayer(client.sessionId);
+    await this.sendInventoryState(client);
 
     const characterQuests = await prisma.characterQuest.findMany({ where: { characterId: character.id } });
     const completed = new Set<string>();

@@ -76,11 +76,53 @@ export interface NpcSpawnDTO {
 
 export type NpcSpawnInput = Omit<NpcSpawnDTO, "id" | "mapId">;
 
+// Categories an equippable item can belong to — ring/trinket are categories
+// with two concrete slots each (see EquipmentSlot).
+export type ItemSlotType = "helmet" | "gloves" | "chest" | "spalders" | "boots" | "legs" | "amulet" | "ring" | "trinket";
+
+export type ItemRarity = "common" | "rare" | "epic" | "legendary";
+
+// The concrete, addressable slots on a character.
+export type EquipmentSlot =
+  | "helmet"
+  | "gloves"
+  | "chest"
+  | "spalders"
+  | "boots"
+  | "legs"
+  | "amulet"
+  | "ring1"
+  | "ring2"
+  | "trinket1"
+  | "trinket2";
+
+export const EQUIPMENT_SLOTS: EquipmentSlot[] = [
+  "helmet",
+  "amulet",
+  "chest",
+  "spalders",
+  "gloves",
+  "legs",
+  "boots",
+  "ring1",
+  "ring2",
+  "trinket1",
+  "trinket2",
+];
+
 export interface ItemTemplateDTO {
   id: string;
   name: string;
   description: string;
   color: number;
+  slotType: ItemSlotType | null;
+  rarity: ItemRarity;
+  bonusArmor: number;
+  bonusStrength: number;
+  bonusIntelligence: number;
+  bonusDexterity: number;
+  bonusCriticalChance: number;
+  bonusHp: number;
 }
 
 export type ItemTemplateInput = Omit<ItemTemplateDTO, "id">;
