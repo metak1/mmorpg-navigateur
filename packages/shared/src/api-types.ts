@@ -80,3 +80,24 @@ export interface ActiveMapResponse {
   spawnX: number;
   spawnY: number;
 }
+
+export interface AccountDTO {
+  id: string;
+  username: string;
+  role: "player" | "admin";
+}
+
+export interface AuthResponse {
+  token: string;
+  account: AccountDTO;
+}
+
+export interface CharacterDTO {
+  id: string;
+  name: string;
+  className: string | null;
+}
+
+export type CharacterInput = { name: string; className: string };
+
+export const MAX_CHARACTERS_PER_ACCOUNT = 5;

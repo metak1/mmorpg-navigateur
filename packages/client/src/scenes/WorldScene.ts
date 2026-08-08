@@ -90,8 +90,8 @@ export class WorldScene extends Phaser.Scene {
   private wasd?: Record<"W" | "A" | "S" | "D", Phaser.Input.Keyboard.Key>;
   private lastDirection: "up" | "down" | "left" | "right" = "down";
   private lastSent = { dx: 0, dy: 0 };
-  private username = "Player";
-  private className?: string;
+  private token = "";
+  private characterId = "";
   private mapGrid: TileGrid = { tileData: [[0]], tileSize: 32, cols: 1, rows: 1 };
   private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
   private spellDefs = new Map<SpellId, SpellDef>();
@@ -110,9 +110,9 @@ export class WorldScene extends Phaser.Scene {
     super("world");
   }
 
-  init(data: { username: string; className?: string }) {
-    this.username = data.username;
-    this.className = data.className;
+  init(data: { token: string; characterId: string }) {
+    this.token = data.token;
+    this.characterId = data.characterId;
   }
 
   preload() {
@@ -120,6 +120,16 @@ export class WorldScene extends Phaser.Scene {
   }
 
   async create() {
+    try {
+      await this.buildWorld();
+    } catch (err) {
+      window.dispatchEvent(
+        new CustomEvent("world-error", { detail: err instanceof Error ? err.message : "Failed to load world." }),
+      );
+    }
+  }
+
+  private async buildWorld() {
     const [activeMap, spells] = await Promise.all([fetchActiveMap(), fetchSpells()]);
 
     this.mapGrid = {
@@ -201,7 +211,7 @@ export class WorldScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(1000);
 
-    const { room, $ } = await connectToWorld(this.username, this.className);
+    const { room, $ } = await connectToWorld(this.token, this.characterId);
     this.room = room;
 
     room.onMessage("heal", (msg: HealEventMessage) => this.playHealEffect(msg.sessionId));
@@ -240,6 +250,7 @@ export class WorldScene extends Phaser.Scene {
         });
         this.setupSpellbarForClass(player.classId, player.className);
         this.hud?.setHealth(player.hp, player.maxHp);
+        window.dispatchEvent(new CustomEvent("world-ready"));
       }
 
       $(player).onChange(() => {

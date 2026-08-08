@@ -3,13 +3,13 @@ import type { SpellId } from "./spells.js";
 export const WORLD_ROOM = "world";
 export const MOVE_SPEED = 200; // px/sec
 
-// Options sent when joining the world room. `className` is only consulted
-// for a brand-new account — an existing account's stored class always wins
-// (see WorldRoom.onJoin), so a returning player's login-form selection is
-// simply ignored.
+// Options sent when joining the world room. The session token is issued by
+// POST /api/auth/login or /api/auth/register and identifies the account
+// server-side; characterId selects which of that account's characters to
+// play — the room verifies both, it never trusts a client-supplied name.
 export interface JoinOptions {
-  name: string;
-  className?: string;
+  token: string;
+  characterId: string;
 }
 
 export interface MoveInputMessage {

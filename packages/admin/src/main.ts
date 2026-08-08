@@ -3,6 +3,7 @@ import { renderMonstersPage } from "./pages/monsters.js";
 import { renderSpellsPage } from "./pages/spells.js";
 import { renderMapsPage } from "./pages/maps.js";
 import { getToken, setToken, clearToken } from "./auth.js";
+import { login, api } from "./api.js";
 
 const app = document.querySelector<HTMLElement>("#app")!;
 const content = document.querySelector<HTMLElement>("#content")!;
@@ -27,21 +28,43 @@ function renderLogin() {
   overlay.innerHTML = `
     <form id="admin-login-form">
       <h1>Admin Login</h1>
-      <input id="admin-token-input" type="password" placeholder="Admin token" autocomplete="off" required />
+      <input id="admin-username-input" type="text" placeholder="Username" autocomplete="username" required />
+      <input id="admin-password-input" type="password" placeholder="Password" autocomplete="current-password" required />
+      <p id="admin-login-error"></p>
       <button type="submit">Enter</button>
     </form>
   `;
   document.body.appendChild(overlay);
 
+  const errorEl = overlay.querySelector<HTMLParagraphElement>("#admin-login-error")!;
+  const submitBtn = overlay.querySelector<HTMLButtonElement>("button[type=submit]")!;
+
   overlay.querySelector<HTMLFormElement>("#admin-login-form")!.addEventListener("submit", (event) => {
     event.preventDefault();
-    const input = overlay!.querySelector<HTMLInputElement>("#admin-token-input")!;
-    const token = input.value.trim();
-    if (!token) return;
-    setToken(token);
-    overlay!.remove();
-    app.style.display = "";
-    render();
+    const username = overlay!.querySelector<HTMLInputElement>("#admin-username-input")!.value.trim();
+    const password = overlay!.querySelector<HTMLInputElement>("#admin-password-input")!.value;
+    if (!username || !password) return;
+
+    errorEl.textContent = "";
+    submitBtn.disabled = true;
+
+    login(username, password)
+      .then(({ token, account }) => {
+        if (account.role !== "admin") {
+          errorEl.textContent = "This account does not have admin access.";
+          return;
+        }
+        setToken(token);
+        overlay!.remove();
+        app.style.display = "";
+        render();
+      })
+      .catch((err: unknown) => {
+        errorEl.textContent = err instanceof Error ? err.message : "Login failed.";
+      })
+      .finally(() => {
+        submitBtn.disabled = false;
+      });
   });
 }
 
@@ -64,4 +87,16 @@ logoutLink.addEventListener("click", (event) => {
 
 window.addEventListener("hashchange", render);
 window.addEventListener("admin-unauthorized", render);
-render();
+
+const existingToken = getToken();
+if (existingToken) {
+  api
+    .me()
+    .then(() => render())
+    .catch(() => {
+      clearToken();
+      render();
+    });
+} else {
+  render();
+}

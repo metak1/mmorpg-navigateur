@@ -8,3 +8,8 @@ packages/server/dev.db
 packages/server/dev.db-journal
 packages/server/prisma/dev.db
 packages/server/prisma/dev.db-journal
+
+# Stray file some Windows toolchain step creates when a `2>nul` redirect
+# runs under Git Bash instead of cmd.exe (nul is a reserved device name on
+# cmd.exe, not on POSIX shells, so bash creates a literal file called "nul").
+nul

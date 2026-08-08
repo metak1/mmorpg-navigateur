@@ -73,7 +73,7 @@
         padding: 12px;
       }
 
-      #login-overlay {
+      .auth-overlay {
         position: fixed;
         inset: 0;
         display: flex;
@@ -82,7 +82,7 @@
         background: #111;
         font-family: sans-serif;
       }
-      #login-form {
+      .auth-form {
         display: flex;
         flex-direction: column;
         gap: 12px;
@@ -91,12 +91,18 @@
         border-radius: 8px;
         min-width: 240px;
       }
-      #login-form h1 {
+      .auth-form h1 {
         margin: 0 0 4px;
         color: #fff;
         font-size: 18px;
       }
+      .auth-form p {
+        margin: 0 0 4px;
+        color: #999;
+        font-size: 13px;
+      }
       #username-input,
+      #password-input,
       #class-select {
         padding: 8px;
         font-size: 14px;
@@ -112,7 +118,22 @@
         font-size: 12px;
         color: #999;
       }
-      #login-form button {
+      .auth-error {
+        margin: 0;
+        color: #ff6666;
+        font-size: 12px;
+        min-height: 14px;
+      }
+      #login-mode-toggle {
+        background: none;
+        border: none;
+        color: #00ff88;
+        font-size: 12px;
+        cursor: pointer;
+        padding: 0;
+        text-align: left;
+      }
+      .auth-form button[type="submit"] {
         padding: 8px;
         font-size: 14px;
         border-radius: 4px;
@@ -122,18 +143,123 @@
         cursor: pointer;
         font-weight: bold;
       }
+      .auth-form button[type="button"] {
+        background: none;
+        border: 1px solid #444;
+        color: #ccc;
+        border-radius: 4px;
+        padding: 8px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .auth-form button[type="button"]:hover { background: #262626; }
+
+      #character-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 220px;
+      }
+      #character-list li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 10px;
+        background: #111;
+        border: 1px solid #333;
+        border-radius: 4px;
+      }
+      #character-list .character-name { color: #fff; font-size: 14px; }
+      #character-list .character-class { color: #999; font-size: 12px; }
+      #character-list button {
+        padding: 6px 10px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: none;
+        background: #00ff88;
+        color: #111;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #character-list-empty {
+        margin: 0;
+        color: #999;
+        font-size: 13px;
+      }
+
+      #loading-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: none;
+        flex-direction: column;
+        gap: 16px;
+        justify-content: center;
+        align-items: center;
+        background: #111;
+        font-family: sans-serif;
+      }
+      #loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 4px solid #333;
+        border-top-color: #00ff88;
+        border-radius: 50%;
+        animation: loading-spin 0.8s linear infinite;
+      }
+      @keyframes loading-spin {
+        to { transform: rotate(360deg); }
+      }
+      #loading-text {
+        color: #ccc;
+        font-size: 14px;
+      }
+      #loading-error {
+        color: #ff6666;
+        font-size: 13px;
+        max-width: 320px;
+        text-align: center;
+      }
     </style>
   </head>
   <body>
-    <div id="login-overlay">
-      <form id="login-form">
+    <div id="loading-overlay">
+      <div id="loading-spinner"></div>
+      <p id="loading-text">Entering the world&hellip;</p>
+      <p id="loading-error"></p>
+    </div>
+    <div id="login-overlay" class="auth-overlay">
+      <form id="login-form" class="auth-form">
         <h1>mmorpg-navigateur</h1>
-        <input id="username-input" type="text" placeholder="Username" autocomplete="off" required />
+        <input id="username-input" type="text" placeholder="Username" autocomplete="username" required />
+        <input id="password-input" type="password" placeholder="Password" autocomplete="current-password" required />
+        <p id="login-error" class="auth-error"></p>
+        <button type="submit" id="login-submit">Log in</button>
+        <button type="button" id="login-mode-toggle">New player? Create an account</button>
+      </form>
+    </div>
+    <div id="character-overlay" class="auth-overlay" style="display: none">
+      <div id="character-select-panel" class="auth-form">
+        <h1>Choose your character</h1>
+        <ul id="character-list"></ul>
+        <p id="character-list-empty" style="display: none">You have no characters yet.</p>
+        <p id="character-select-error" class="auth-error"></p>
+        <button type="button" id="character-create-toggle">+ Create new character</button>
+      </div>
+      <form id="character-form" class="auth-form" style="display: none">
+        <h1>Create your character</h1>
+        <input id="character-name-input" type="text" placeholder="Character name" autocomplete="off" required />
         <label id="class-select-label">
-          Class (new characters only)
+          Class
           <select id="class-select"></select>
         </label>
-        <button type="submit">Play</button>
+        <p id="character-form-error" class="auth-error"></p>
+        <button type="submit">Create &amp; play</button>
+        <button type="button" id="character-create-cancel">Back</button>
       </form>
     </div>
     <div id="game-layout">

@@ -9,9 +9,28 @@ datasource db {
   provider = "postgresql"
 }
 
+enum Role {
+  player
+  admin
+}
+
 model Account {
+  id           String      @id @default(cuid())
+  username     String      @unique
+  passwordHash String
+  role         Role        @default(player)
+  characters   Character[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+// A character is the in-game identity (name, position, class) an account
+// plays as. One account can own several — the account is just the login.
+model Character {
   id        String         @id @default(cuid())
-  username  String         @unique
+  accountId String
+  account   Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name      String         @unique
   x         Float
   y         Float
   classId   String?
@@ -21,13 +40,13 @@ model Account {
 }
 
 model ClassTemplate {
-  id        String          @id @default(cuid())
-  name      String          @unique
-  color     Int
-  spells    SpellTemplate[]
-  accounts  Account[]
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  id         String          @id @default(cuid())
+  name       String          @unique
+  color      Int
+  spells     SpellTemplate[]
+  characters Character[]
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
 }
 
 model MonsterTemplate {

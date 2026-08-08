@@ -1,6 +1,7 @@
 import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import { onContentChanged } from "../contentEvents.js";
+import { verifyToken } from "../auth/jwt.js";
 import type { MonsterTemplate, SpellTemplate } from "@prisma/client";
 import {
   Player,
@@ -67,6 +68,7 @@ export class WorldRoom extends Room<RoomState> {
   private castTimeouts = new Map<string, Delayed>();
   private gcdUntil = new Map<string, number>();
   private invulnerableUntil = new Map<string, number>();
+  private characterIds = new Map<string, string>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
   private projectileSeq = 0;
@@ -557,45 +559,45 @@ export class WorldRoom extends Room<RoomState> {
   }
 
   async onJoin(client: Client, options: JoinOptions) {
-    const username = options.name || `Player-${client.sessionId.slice(0, 4)}`;
-
-    // Class is chosen once, at character creation, and is permanent — an
-    // existing account's stored class always wins over whatever the login
-    // form's dropdown currently shows.
-    let account = await prisma.account.findUnique({ where: { username }, include: { class: true } });
-
-    if (!account) {
-      const chosenClass = await prisma.classTemplate.findUnique({ where: { name: options.className ?? "" } });
-      if (!chosenClass) {
-        throw new Error(`Cannot create account "${username}": unknown or missing class "${options.className}".`);
-      }
-      account = await prisma.account.create({
-        data: { username, x: this.spawnX, y: this.spawnY, classId: chosenClass.id },
-        include: { class: true },
-      });
+    const payload = verifyToken(options.token);
+    if (!payload) {
+      throw new Error("Invalid or expired session. Please log in again.");
     }
 
-    if (!account.class) {
-      throw new Error(`Account "${username}" has no class assigned.`);
+    // Ownership check: the character must belong to the account the token
+    // was issued to — a client can't join as a character it doesn't own by
+    // passing an arbitrary characterId alongside a valid token.
+    const character = await prisma.character.findFirst({
+      where: { id: options.characterId, accountId: payload.sub },
+      include: { class: true },
+    });
+    if (!character) {
+      throw new Error("Character not found.");
+    }
+    if (!character.class) {
+      throw new Error(`Character "${character.name}" has no class assigned.`);
     }
 
     const player = new Player();
     player.sessionId = client.sessionId;
-    player.name = username;
-    player.x = account.x;
-    player.y = account.y;
+    player.name = character.name;
+    player.x = character.x;
+    player.y = character.y;
     player.hp = PLAYER_MAX_HP;
     player.maxHp = PLAYER_MAX_HP;
-    player.classId = account.class.id;
-    player.className = account.class.name;
+    player.classId = character.class.id;
+    player.className = character.class.name;
 
     this.state.players.set(client.sessionId, player);
+    this.characterIds.set(client.sessionId, character.id);
     console.log(`${player.name} (${player.className}) joined ${this.roomId}`);
   }
 
   async onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
+    const characterId = this.characterIds.get(client.sessionId);
     this.state.players.delete(client.sessionId);
+    this.characterIds.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.invulnerableUntil.delete(client.sessionId);
     this.interruptCast(client.sessionId);
@@ -604,10 +606,10 @@ export class WorldRoom extends Room<RoomState> {
       this.lastCastAt.delete(`${client.sessionId}:${spellId}`);
     }
 
-    if (player) {
+    if (player && characterId) {
       try {
-        await prisma.account.update({
-          where: { username: player.name },
+        await prisma.character.update({
+          where: { id: characterId },
           data: { x: player.x, y: player.y },
         });
       } catch (err) {

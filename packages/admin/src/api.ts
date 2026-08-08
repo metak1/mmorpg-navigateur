@@ -7,10 +7,29 @@ import type {
   SpellTemplateInput,
   GameMapDTO,
   GameMapInput,
+  AccountDTO,
+  AuthResponse,
 } from "shared";
 import { getToken, clearToken } from "./auth.js";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:2567";
+
+// Deliberately not routed through request() below — that helper's 401
+// handling assumes an already-authenticated session that just expired,
+// which is the wrong semantic for a fresh login attempt that never had a
+// token to begin with.
+export async function login(username: string, password: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = (await res.json().catch(() => ({}))) as AuthResponse & { error?: string };
+  if (!res.ok) {
+    throw new Error(body.error ?? `Request failed: ${res.status}`);
+  }
+  return body;
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
@@ -38,6 +57,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  me: () => request<AccountDTO>("/api/auth/me"),
+
   listClasses: () => request<ClassTemplateDTO[]>("/api/classes"),
   createClass: (data: ClassTemplateInput) =>
     request<ClassTemplateDTO>("/api/classes", { method: "POST", body: JSON.stringify(data) }),

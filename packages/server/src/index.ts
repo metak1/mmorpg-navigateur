@@ -1,5 +1,6 @@
 import http from "node:http";
 import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { Server } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
@@ -8,6 +9,8 @@ import { monstersRouter } from "./api/monsters.js";
 import { spellsRouter } from "./api/spells.js";
 import { mapsRouter } from "./api/maps.js";
 import { classesRouter } from "./api/classes.js";
+import { authRouter } from "./api/authRoutes.js";
+import { charactersRouter } from "./api/characters.js";
 
 const port = Number(process.env.PORT ?? 2567);
 // Bind all interfaces in production (most hosts route traffic to the
@@ -27,6 +30,18 @@ app.use("/api/monsters", monstersRouter);
 app.use("/api/spells", spellsRouter);
 app.use("/api/maps", mapsRouter);
 app.use("/api/classes", classesRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/characters", charactersRouter);
+
+app.use((_req, res) => res.status(404).json({ error: "Not found" }));
+
+// Last-resort handler: logs the real error server-side but never forwards
+// message/stack to the client (Express's default HTML error page used to
+// leak internal file paths for anything asyncRoute didn't special-case).
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error(err);
+  res.status(500).json({ error: "Internal server error" });
+});
 
 const httpServer = http.createServer(app);
 
