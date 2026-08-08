@@ -10,4 +10,7 @@ export class Player extends Schema {
   @type("number") maxHp: number = 0;
   @type("string") classId: string = "";
   @type("string") className: string = "";
+  @type("number") level: number = 1;
+  @type("number") experience: number = 0;
+  @type("number") xpToNextLevel: number = 100;
 }

@@ -8,4 +8,5 @@ export class Monster extends Schema {
   @type("number") hp: number = 0;
   @type("number") maxHp: number = 0;
   @type("boolean") slowed: boolean = false;
+  @type("number") level: number = 1;
 }

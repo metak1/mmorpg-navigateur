@@ -28,3 +28,6 @@ export const DEFAULT_CHASE_SPEED = 90; // px/sec
 export const DEFAULT_MONSTER_ATTACK_RANGE = 32; // px, contact damage range
 export const DEFAULT_MONSTER_TOUCH_DAMAGE = 10;
 export const DEFAULT_MONSTER_ATTACK_COOLDOWN_MS = 1000;
+export const DEFAULT_MONSTER_LEVEL = 1;
+export const DEFAULT_MONSTER_ARMOR = 2;
+export const DEFAULT_MONSTER_XP_REWARD = 25;

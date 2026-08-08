@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { CharacterDTO } from "shared";
-import { MAX_CHARACTERS_PER_ACCOUNT } from "shared";
+import { MAX_CHARACTERS_PER_ACCOUNT, BASE_CLASS_STATS, DEFAULT_CRITICAL_CHANCE } from "shared";
 import { prisma } from "../db.js";
 import { asyncRoute } from "./errors.js";
 import { requireAuth } from "./adminAuth.js";
@@ -8,8 +8,13 @@ import { requireAuth } from "./adminAuth.js";
 export const charactersRouter = Router();
 charactersRouter.use(requireAuth);
 
-function characterDTO(character: { id: string; name: string; class: { name: string } | null }): CharacterDTO {
-  return { id: character.id, name: character.name, className: character.class?.name ?? null };
+function characterDTO(character: {
+  id: string;
+  name: string;
+  level: number;
+  class: { name: string } | null;
+}): CharacterDTO {
+  return { id: character.id, name: character.name, className: character.class?.name ?? null, level: character.level };
 }
 
 charactersRouter.get(
@@ -53,6 +58,8 @@ charactersRouter.post(
       return;
     }
 
+    const baseStats = BASE_CLASS_STATS[chosenClass.name] ?? { armor: 0, strength: 0, intelligence: 0, dexterity: 0 };
+
     let character;
     try {
       character = await prisma.character.create({
@@ -62,6 +69,8 @@ charactersRouter.post(
           x: map.spawnX,
           y: map.spawnY,
           classId: chosenClass.id,
+          ...baseStats,
+          criticalChance: DEFAULT_CRITICAL_CHANCE,
         },
         include: { class: true },
       });

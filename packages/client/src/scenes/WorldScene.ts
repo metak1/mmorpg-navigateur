@@ -53,6 +53,7 @@ interface MonsterEntity extends HpBarHolder {
   name: string;
   hp: number;
   maxHp: number;
+  level: number;
 }
 
 interface ProjectileEntity {
@@ -250,6 +251,7 @@ export class WorldScene extends Phaser.Scene {
         });
         this.setupSpellbarForClass(player.classId, player.className);
         this.hud?.setHealth(player.hp, player.maxHp);
+        this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
         window.dispatchEvent(new CustomEvent("world-ready"));
       }
 
@@ -257,8 +259,14 @@ export class WorldScene extends Phaser.Scene {
         entity.targetX = player.x;
         entity.targetY = player.y;
         entity.hp = player.hp;
+        // maxHp changes mid-session on level-up — keep the cached copy in
+        // sync so the HP bar's fraction doesn't render against a stale value.
+        entity.maxHp = player.maxHp;
         hpBarFill.width = HP_BAR_WIDTH * Math.max(0, player.hp / entity.maxHp);
-        if (isLocal) this.hud?.setHealth(player.hp, player.maxHp);
+        if (isLocal) {
+          this.hud?.setHealth(player.hp, player.maxHp);
+          this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
+        }
       });
     });
 
@@ -287,6 +295,7 @@ export class WorldScene extends Phaser.Scene {
         name: monster.name,
         hp: monster.hp,
         maxHp: monster.maxHp,
+        level: monster.level,
       };
       this.monsters.set(id, entity);
 
@@ -506,7 +515,7 @@ export class WorldScene extends Phaser.Scene {
     } else {
       const monster = this.monsters.get(this.target.id);
       if (!monster) return;
-      name = monster.name;
+      name = `${monster.name} (Lvl ${monster.level})`;
       hp = monster.hp;
       maxHp = monster.maxHp;
     }

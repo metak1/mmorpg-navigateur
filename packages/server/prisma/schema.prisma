@@ -27,16 +27,23 @@ model Account {
 // A character is the in-game identity (name, position, class) an account
 // plays as. One account can own several — the account is just the login.
 model Character {
-  id        String         @id @default(cuid())
-  accountId String
-  account   Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  name      String         @unique
-  x         Float
-  y         Float
-  classId   String?
-  class     ClassTemplate? @relation(fields: [classId], references: [id])
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
+  id             String         @id @default(cuid())
+  accountId      String
+  account        Account        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name           String         @unique
+  x              Float
+  y              Float
+  classId        String?
+  class          ClassTemplate? @relation(fields: [classId], references: [id])
+  level          Int            @default(1)
+  experience     Int            @default(0)
+  armor          Float          @default(0)
+  strength       Float          @default(0)
+  intelligence   Float          @default(0)
+  dexterity      Float          @default(0)
+  criticalChance Float          @default(5)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 }
 
 model ClassTemplate {
@@ -61,6 +68,9 @@ model MonsterTemplate {
   attackRange        Float
   touchDamage        Float
   attackCooldownMs   Int
+  level              Int      @default(1)
+  armor              Float    @default(0)
+  xpReward           Int      @default(20)
   spawns             MonsterSpawn[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt

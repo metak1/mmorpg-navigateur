@@ -20,6 +20,9 @@ export interface MonsterTemplateDTO {
   attackRange: number;
   touchDamage: number;
   attackCooldownMs: number;
+  level: number;
+  armor: number;
+  xpReward: number;
 }
 
 export type MonsterTemplateInput = Omit<MonsterTemplateDTO, "id">;
@@ -96,6 +99,7 @@ export interface CharacterDTO {
   id: string;
   name: string;
   className: string | null;
+  level: number;
 }
 
 export type CharacterInput = { name: string; className: string };

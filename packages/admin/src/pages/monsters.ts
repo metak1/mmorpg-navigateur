@@ -13,6 +13,9 @@ const FIELDS: FieldSpec[] = [
   { name: "attackRange", label: "Attack Range (px)", type: "number" },
   { name: "touchDamage", label: "Touch Damage", type: "number" },
   { name: "attackCooldownMs", label: "Attack Cooldown (ms)", type: "number" },
+  { name: "level", label: "Level", type: "number" },
+  { name: "armor", label: "Armor", type: "number" },
+  { name: "xpReward", label: "XP Reward", type: "number" },
 ];
 
 const DEFAULT_VALUES: MonsterTemplateInput = {
@@ -26,6 +29,9 @@ const DEFAULT_VALUES: MonsterTemplateInput = {
   attackRange: 32,
   touchDamage: 10,
   attackCooldownMs: 1000,
+  level: 1,
+  armor: 2,
+  xpReward: 25,
 };
 
 function toInput(values: Record<string, string>): MonsterTemplateInput {
@@ -40,6 +46,9 @@ function toInput(values: Record<string, string>): MonsterTemplateInput {
     attackRange: Number(values.attackRange),
     touchDamage: Number(values.touchDamage),
     attackCooldownMs: Number(values.attackCooldownMs),
+    level: Number(values.level),
+    armor: Number(values.armor),
+    xpReward: Number(values.xpReward),
   };
 }
 
@@ -103,6 +112,9 @@ export async function renderMonstersPage(container: HTMLElement) {
         { key: "aggroRange", label: "Aggro Range" },
         { key: "chaseSpeed", label: "Chase Speed" },
         { key: "touchDamage", label: "Touch Dmg" },
+        { key: "level", label: "Level" },
+        { key: "armor", label: "Armor" },
+        { key: "xpReward", label: "XP Reward" },
       ],
       list,
       [

@@ -19,6 +19,11 @@ import {
   PLAYER_RESPAWN_INVULNERABLE_MS,
   GLOBAL_COOLDOWN_MS,
   PROJECTILE_HIT_RADIUS,
+  applyArmor,
+  rollMagnitude,
+  grantExperience,
+  xpToNextLevel,
+  HP_PER_LEVEL,
   type TileGrid,
   type JoinOptions,
   type MoveInputMessage,
@@ -29,6 +34,7 @@ import {
   type SpellId,
   type SpellDef,
   type SpellKind,
+  type CombatStats,
 } from "shared";
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
@@ -58,6 +64,9 @@ interface ProjectileRuntime {
   // updateProjectiles), so a moving monster can't dodge by outrunning the
   // direction the projectile was launched in.
   targetId?: string;
+  // Whose stats to roll for damage scaling/crit and who to credit XP to on
+  // kill — the caster who launched this projectile, not whoever it hits.
+  casterSessionId: string;
 }
 
 export class WorldRoom extends Room<RoomState> {
@@ -69,6 +78,7 @@ export class WorldRoom extends Room<RoomState> {
   private gcdUntil = new Map<string, number>();
   private invulnerableUntil = new Map<string, number>();
   private characterIds = new Map<string, string>();
+  private characterStats = new Map<string, CombatStats>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
   private projectileSeq = 0;
@@ -181,6 +191,7 @@ export class WorldRoom extends Room<RoomState> {
       if (!runtime) continue;
       monster.maxHp = runtime.template.maxHp;
       monster.hp = Math.min(monster.hp, monster.maxHp);
+      monster.level = runtime.template.level;
     }
   }
 
@@ -192,6 +203,7 @@ export class WorldRoom extends Room<RoomState> {
     monster.y = spawn.y;
     monster.hp = template.maxHp;
     monster.maxHp = template.maxHp;
+    monster.level = template.level;
     this.state.monsters.set(id, monster);
 
     this.monsterRuntime.set(id, {
@@ -265,7 +277,8 @@ export class WorldRoom extends Room<RoomState> {
 
     if (spell.kind === "heal") {
       this.lastCastAt.set(cooldownKey, this.clock.currentTime);
-      player.hp = Math.min(player.maxHp, player.hp + (spell.healAmount ?? 0));
+      const healAmount = this.rollForCaster(sessionId, player.className, spell.healAmount ?? 0);
+      player.hp = Math.min(player.maxHp, player.hp + healAmount);
       this.broadcast("heal", { sessionId } satisfies HealEventMessage);
       return;
     }
@@ -309,6 +322,7 @@ export class WorldRoom extends Room<RoomState> {
       spellId: message.spellId,
       classId: player.classId,
       targetId: message.targetId,
+      casterSessionId: sessionId,
     });
   }
 
@@ -338,13 +352,15 @@ export class WorldRoom extends Room<RoomState> {
 
     for (const [id, monster] of this.state.monsters) {
       if (Math.hypot(monster.x - targetX, monster.y - targetY) <= radius) {
-        this.damageMonster(id, monster, spell.damage ?? 0);
+        const amount = this.rollForCaster(player.sessionId, player.className, spell.damage ?? 0);
+        this.damageMonster(id, monster, amount, player.sessionId);
       }
     }
 
     for (const [sessionId, ally] of this.state.players) {
       if (Math.hypot(ally.x - targetX, ally.y - targetY) <= radius) {
-        ally.hp = Math.min(ally.maxHp, ally.hp + (spell.healAmount ?? 0));
+        const healAmount = this.rollForCaster(player.sessionId, player.className, spell.healAmount ?? 0);
+        ally.hp = Math.min(ally.maxHp, ally.hp + healAmount);
         this.broadcast("heal", { sessionId } satisfies HealEventMessage);
       }
     }
@@ -448,12 +464,23 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
+  // Rolls a caster's primary-stat bonus + crit chance for a spell's base
+  // damage/heal magnitude. Falls back to the unmodified base if the caster
+  // has already left (their entry in characterStats is gone) — a projectile
+  // in flight can still land after its caster disconnects.
+  private rollForCaster(casterSessionId: string, className: string, base: number): number {
+    const stats = this.characterStats.get(casterSessionId);
+    if (!stats) return base;
+    return rollMagnitude(base, className, stats).amount;
+  }
+
   private damagePlayer(player: Player, amount: number) {
     const now = this.clock.currentTime;
     const invulnUntil = this.invulnerableUntil.get(player.sessionId) ?? 0;
     if (now < invulnUntil) return;
 
-    player.hp -= amount;
+    const armor = this.characterStats.get(player.sessionId)?.armor ?? 0;
+    player.hp -= applyArmor(amount, armor);
     if (player.hp <= 0) {
       player.hp = player.maxHp;
       player.x = this.spawnX;
@@ -462,12 +489,13 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
-  private damageMonster(id: string, monster: Monster, amount: number) {
-    monster.hp -= amount;
+  private damageMonster(id: string, monster: Monster, amount: number, casterSessionId?: string) {
+    const runtime = this.monsterRuntime.get(id);
+    monster.hp -= applyArmor(amount, runtime?.template.armor ?? 0);
     if (monster.hp <= 0) {
-      const runtime = this.monsterRuntime.get(id);
       this.state.monsters.delete(id);
       if (runtime) {
+        if (casterSessionId) void this.grantXp(casterSessionId, runtime.template.xpReward);
         this.clock.setTimeout(
           () => this.spawnMonster(id, { x: runtime.homeX, y: runtime.homeY }, runtime.template),
           MONSTER_RESPAWN_MS,
@@ -476,13 +504,55 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
-  private resolveSpellHit(spell: SpellDef, monster: Monster, monsterId: string, hitX: number, hitY: number) {
+  // Applies gained XP (handling multi-level-ups) and, only when a level-up
+  // actually occurred, persists the new stat block immediately — an
+  // infrequent, discrete event worth its own write rather than waiting for
+  // onLeave. XP gained without a level-up still rides along with onLeave's
+  // existing persistence.
+  private async grantXp(sessionId: string, xpAmount: number) {
+    const player = this.state.players.get(sessionId);
+    const stats = this.characterStats.get(sessionId);
+    const characterId = this.characterIds.get(sessionId);
+    if (!player || !stats || !characterId) return;
+
+    const { stats: updated, hpGained, leveledUp } = grantExperience(player.className, stats, xpAmount);
+    this.characterStats.set(sessionId, updated);
+
+    player.level = updated.level;
+    player.experience = updated.experience;
+    player.xpToNextLevel = xpToNextLevel(updated.level);
+    if (hpGained > 0) {
+      player.maxHp += hpGained;
+      player.hp += hpGained;
+    }
+
+    if (leveledUp) {
+      console.log(`${player.name} leveled up to ${updated.level}`);
+      try {
+        await prisma.character.update({ where: { id: characterId }, data: { ...updated } });
+      } catch (err) {
+        console.error(`Failed to persist level-up for ${player.name}:`, err);
+      }
+    }
+  }
+
+  private resolveSpellHit(
+    spell: SpellDef,
+    monster: Monster,
+    monsterId: string,
+    hitX: number,
+    hitY: number,
+    casterSessionId: string,
+  ) {
+    const casterClassName = this.state.players.get(casterSessionId)?.className ?? "";
+
     if (spell.kind === "aoe") {
       const radius = spell.aoeRadius ?? 0;
       for (const [id, m] of this.state.monsters) {
         const dist = Math.hypot(m.x - hitX, m.y - hitY);
         if (dist <= radius) {
-          this.damageMonster(id, m, spell.damage ?? 0);
+          const amount = this.rollForCaster(casterSessionId, casterClassName, spell.damage ?? 0);
+          this.damageMonster(id, m, amount, casterSessionId);
         }
       }
       return;
@@ -496,7 +566,8 @@ export class WorldRoom extends Room<RoomState> {
       }
     }
 
-    this.damageMonster(monsterId, monster, spell.damage ?? 0);
+    const amount = this.rollForCaster(casterSessionId, casterClassName, spell.damage ?? 0);
+    this.damageMonster(monsterId, monster, amount, casterSessionId);
   }
 
   private updateProjectiles(dt: number) {
@@ -544,7 +615,7 @@ export class WorldRoom extends Room<RoomState> {
         for (const [monsterId, monster] of this.state.monsters) {
           const dist = Math.hypot(monster.x - projectile.x, monster.y - projectile.y);
           if (dist <= PROJECTILE_HIT_RADIUS + MONSTER_COLLISION_RADIUS) {
-            this.resolveSpellHit(spell, monster, monsterId, projectile.x, projectile.y);
+            this.resolveSpellHit(spell, monster, monsterId, projectile.x, projectile.y, runtime.casterSessionId);
             hit = true;
             break;
           }
@@ -578,15 +649,29 @@ export class WorldRoom extends Room<RoomState> {
       throw new Error(`Character "${character.name}" has no class assigned.`);
     }
 
+    const stats: CombatStats = {
+      level: character.level,
+      experience: character.experience,
+      armor: character.armor,
+      strength: character.strength,
+      intelligence: character.intelligence,
+      dexterity: character.dexterity,
+      criticalChance: character.criticalChance,
+    };
+    this.characterStats.set(client.sessionId, stats);
+
     const player = new Player();
     player.sessionId = client.sessionId;
     player.name = character.name;
     player.x = character.x;
     player.y = character.y;
-    player.hp = PLAYER_MAX_HP;
-    player.maxHp = PLAYER_MAX_HP;
+    player.maxHp = PLAYER_MAX_HP + (character.level - 1) * HP_PER_LEVEL;
+    player.hp = player.maxHp;
     player.classId = character.class.id;
     player.className = character.class.name;
+    player.level = character.level;
+    player.experience = character.experience;
+    player.xpToNextLevel = xpToNextLevel(character.level);
 
     this.state.players.set(client.sessionId, player);
     this.characterIds.set(client.sessionId, character.id);
@@ -596,8 +681,10 @@ export class WorldRoom extends Room<RoomState> {
   async onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
     const characterId = this.characterIds.get(client.sessionId);
+    const stats = this.characterStats.get(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.characterIds.delete(client.sessionId);
+    this.characterStats.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.invulnerableUntil.delete(client.sessionId);
     this.interruptCast(client.sessionId);
@@ -610,7 +697,18 @@ export class WorldRoom extends Room<RoomState> {
       try {
         await prisma.character.update({
           where: { id: characterId },
-          data: { x: player.x, y: player.y },
+          data: {
+            x: player.x,
+            y: player.y,
+            ...(stats && {
+              level: stats.level,
+              experience: stats.experience,
+              armor: stats.armor,
+              strength: stats.strength,
+              intelligence: stats.intelligence,
+              dexterity: stats.dexterity,
+            }),
+          },
         });
       } catch (err) {
         console.error(`Failed to save position for ${player.name}:`, err);

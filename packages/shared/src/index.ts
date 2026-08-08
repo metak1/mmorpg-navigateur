@@ -7,3 +7,4 @@ export * from "./map.js";
 export * from "./combat.js";
 export * from "./spells.js";
 export * from "./api-types.js";
+export * from "./stats.js";

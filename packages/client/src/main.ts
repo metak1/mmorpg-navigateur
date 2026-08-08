@@ -109,7 +109,7 @@ function renderCharacterList(token: string, characters: CharacterDTO[]) {
     li.innerHTML = `
       <span>
         <span class="character-name">${character.name}</span>
-        <span class="character-class"> — ${character.className ?? "no class"}</span>
+        <span class="character-class"> — Lvl ${character.level} ${character.className ?? "no class"}</span>
       </span>
     `;
     const playButton = document.createElement("button");

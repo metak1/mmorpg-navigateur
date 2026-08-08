@@ -6,6 +6,11 @@ const HP_BAR_BOTTOM_MARGIN = 40; // distance from the bottom edge to the bar's v
 const HP_BAR_WIDTH = 220;
 const HP_BAR_HEIGHT = 22;
 
+const LEVEL_BAR_WIDTH = HP_BAR_WIDTH;
+const LEVEL_BAR_HEIGHT = 8;
+const LEVEL_BAR_GAP = 4; // gap between the bottom of the level text and the top of the HP bar
+const LEVEL_TEXT_GAP = 2; // gap between the bottom of the level text and the top of the XP bar
+
 const SLOT_SIZE = 48;
 const SLOT_GAP = 8;
 const SLOT_ICON_SIZE = SLOT_SIZE - 4;
@@ -28,6 +33,8 @@ interface SpellSlot {
 export class Hud {
   private hpBarFill: Phaser.GameObjects.Rectangle;
   private hpText: Phaser.GameObjects.Text;
+  private levelText: Phaser.GameObjects.Text;
+  private xpBarFill: Phaser.GameObjects.Rectangle;
   private slots = new Map<SpellId, SpellSlot>();
   private castBarFill: Phaser.GameObjects.Rectangle;
   private castBarText: Phaser.GameObjects.Text;
@@ -58,6 +65,25 @@ export class Hud {
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(1002);
+
+    const levelTextY = hpBarY - HP_BAR_HEIGHT / 2 - LEVEL_BAR_GAP - LEVEL_BAR_HEIGHT - LEVEL_TEXT_GAP;
+    this.levelText = scene.add
+      .text(HP_BAR_X, levelTextY, "Lvl 1", { fontSize: "12px", color: "#ffcc33" })
+      .setOrigin(0, 1)
+      .setScrollFactor(0)
+      .setDepth(1002);
+
+    const xpBarY = hpBarY - HP_BAR_HEIGHT / 2 - LEVEL_BAR_GAP - LEVEL_BAR_HEIGHT / 2;
+    scene.add
+      .rectangle(HP_BAR_X, xpBarY, LEVEL_BAR_WIDTH, LEVEL_BAR_HEIGHT, 0x222222)
+      .setOrigin(0, 0.5)
+      .setScrollFactor(0)
+      .setDepth(1000);
+    this.xpBarFill = scene.add
+      .rectangle(HP_BAR_X, xpBarY, 0, LEVEL_BAR_HEIGHT, 0x33aaff)
+      .setOrigin(0, 0.5)
+      .setScrollFactor(0)
+      .setDepth(1001);
 
     const totalWidth = order.length * SLOT_SIZE + (order.length - 1) * SLOT_GAP;
     const startX = scene.scale.width / 2 - totalWidth / 2;
@@ -125,6 +151,12 @@ export class Hud {
     const frac = Math.max(0, hp / maxHp);
     this.hpBarFill.width = HP_BAR_WIDTH * frac;
     this.hpText.setText(`${Math.ceil(Math.max(0, hp))} / ${maxHp}`);
+  }
+
+  setLevel(level: number, experience: number, xpToNextLevel: number) {
+    this.levelText.setText(`Lvl ${level}`);
+    const frac = xpToNextLevel > 0 ? Math.max(0, Math.min(1, experience / xpToNextLevel)) : 0;
+    this.xpBarFill.width = LEVEL_BAR_WIDTH * frac;
   }
 
   setSpellDefs(defs: Map<SpellId, SpellDef>) {
