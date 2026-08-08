@@ -106,6 +106,18 @@ export interface QuestCompletedMessage {
   rewardItems: Array<{ name: string; quantity: number }>;
 }
 
+export interface CompletedQuestView {
+  questId: string;
+  title: string;
+}
+
+// Pushed at join and again after every turn-in — the full list is small
+// enough (and infrequent enough to change) that resending it wholesale is
+// simpler than diffing, same call as InventoryStateMessage.
+export interface CompletedQuestsStateMessage {
+  quests: CompletedQuestView[];
+}
+
 // Client -> server: equip an owned item into a specific concrete slot. The
 // slot must be compatible with the item's category (ring items -> ring1/
 // ring2, trinket items -> trinket1/trinket2, everything else maps 1:1).

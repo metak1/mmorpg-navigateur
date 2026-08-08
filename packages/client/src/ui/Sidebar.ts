@@ -47,6 +47,11 @@ export interface QuestLogEntry {
   ready: boolean;
 }
 
+export interface CompletedQuestEntry {
+  questId: string;
+  title: string;
+}
+
 export interface CharacterStatsView {
   className: string;
   level: number;
@@ -87,6 +92,8 @@ export class Sidebar {
   private bodyEl: HTMLElement;
   private currentPanel: PanelKey = DEFAULT_PANEL;
   private quests: QuestLogEntry[] = [];
+  private completedQuests: CompletedQuestEntry[] = [];
+  private showCompletedQuests = false;
   private stats: CharacterStatsView | null = null;
   private inventory: InventoryStateMessage | null = null;
   private inventoryHandlers: InventoryHandlers | null = null;
@@ -120,6 +127,11 @@ export class Sidebar {
     if (this.currentPanel === "quests") this.render();
   }
 
+  setCompletedQuests(quests: CompletedQuestEntry[]) {
+    this.completedQuests = quests;
+    if (this.currentPanel === "quests") this.render();
+  }
+
   setStats(stats: CharacterStatsView) {
     this.stats = stats;
     if (this.currentPanel === "stats") this.render();
@@ -137,7 +149,7 @@ export class Sidebar {
   private render() {
     this.bodyEl.innerHTML = "";
 
-    if (this.currentPanel === "quests" && this.quests.length > 0) {
+    if (this.currentPanel === "quests" && (this.quests.length > 0 || this.completedQuests.length > 0)) {
       this.renderQuests();
       return;
     }
@@ -156,6 +168,12 @@ export class Sidebar {
   private renderQuests() {
     const list = document.createElement("div");
     list.id = "quest-log-list";
+    if (this.quests.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "quest-log-empty";
+      empty.textContent = "No active quests";
+      list.appendChild(empty);
+    }
     for (const quest of this.quests) {
       const item = document.createElement("div");
       item.className = "quest-log-item";
@@ -172,6 +190,33 @@ export class Sidebar {
       list.appendChild(item);
     }
     this.bodyEl.appendChild(list);
+
+    const toggle = document.createElement("button");
+    toggle.id = "quest-log-completed-toggle";
+    toggle.textContent = `${this.showCompletedQuests ? "▾" : "▸"} Completed Quests (${this.completedQuests.length})`;
+    toggle.addEventListener("click", () => {
+      this.showCompletedQuests = !this.showCompletedQuests;
+      this.render();
+    });
+    this.bodyEl.appendChild(toggle);
+
+    if (this.showCompletedQuests) {
+      const completedList = document.createElement("div");
+      completedList.id = "quest-log-completed-list";
+      if (this.completedQuests.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "quest-log-empty";
+        empty.textContent = "No completed quests yet";
+        completedList.appendChild(empty);
+      }
+      for (const quest of this.completedQuests) {
+        const item = document.createElement("div");
+        item.className = "quest-log-item quest-log-item-completed";
+        item.textContent = `${quest.title} ✓`;
+        completedList.appendChild(item);
+      }
+      this.bodyEl.appendChild(completedList);
+    }
   }
 
   private renderStats(stats: CharacterStatsView) {

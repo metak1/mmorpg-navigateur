@@ -18,6 +18,7 @@ import type {
   InventoryStateMessage,
   EquipActionFailedMessage,
   LootDroppedMessage,
+  CompletedQuestsStateMessage,
 } from "shared";
 import { MOVE_SPEED, resolveMovement } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
@@ -253,6 +254,7 @@ export class WorldScene extends Phaser.Scene {
     });
     room.onMessage("inventoryState", (msg: InventoryStateMessage) => sidebar.setInventory(msg));
     room.onMessage("lootDropped", (msg: LootDroppedMessage) => this.playLootEffect(msg));
+    room.onMessage("completedQuestsState", (msg: CompletedQuestsStateMessage) => sidebar.setCompletedQuests(msg.quests));
     room.onMessage("equipActionFailed", (msg: EquipActionFailedMessage) => alert(msg.reason));
     sidebar.setInventoryHandlers({
       onEquip: (itemId, slot) => room.send("equipItem", { itemId, slot }),

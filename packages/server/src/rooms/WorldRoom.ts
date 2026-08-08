@@ -45,6 +45,7 @@ import {
   type EquipActionFailedMessage,
   type InventoryStateMessage,
   type LootDroppedMessage,
+  type CompletedQuestsStateMessage,
   type EquipmentSlot,
   type ItemSlotType,
   type ItemRarity,
@@ -299,6 +300,21 @@ export class WorldRoom extends Room<RoomState> {
       case "bringItems":
         return `Bring ${quest.item?.name ?? "an item"} (${progress}/${quest.requiredCount})`;
     }
+  }
+
+  // Quests deleted from content since being completed are silently dropped
+  // here, same as the active list already does for quests it can't resolve.
+  private buildCompletedQuestsView(sessionId: string): CompletedQuestsStateMessage {
+    const completed = this.completedQuestIds.get(sessionId) ?? new Set<string>();
+    const quests = [...completed]
+      .map((questId) => this.questsById.get(questId))
+      .filter((quest): quest is QuestFull => quest !== undefined)
+      .map((quest) => ({ questId: quest.id, title: quest.title }));
+    return { quests };
+  }
+
+  private sendCompletedQuestsState(client: Client) {
+    client.send("completedQuestsState", this.buildCompletedQuestsView(client.sessionId));
   }
 
   private spawnNpc(id: string, spawn: { x: number; y: number }, template: NpcTemplate) {
@@ -1116,6 +1132,7 @@ export class WorldRoom extends Room<RoomState> {
       this.completedQuestIds.set(sessionId, completed);
     }
     completed.add(quest.id);
+    this.sendCompletedQuestsState(client);
 
     if (quest.rewardXp > 0) void this.grantXp(sessionId, quest.rewardXp);
 
@@ -1295,6 +1312,7 @@ export class WorldRoom extends Room<RoomState> {
       player.quests.push(entry);
     }
     this.completedQuestIds.set(client.sessionId, completed);
+    this.sendCompletedQuestsState(client);
     if (player.quests.some((e) => this.questsById.get(e.questId)?.objectiveType === "bringItems")) {
       await this.refreshBringItemsReadiness(client.sessionId);
     }
