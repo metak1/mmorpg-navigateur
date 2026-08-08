@@ -14,5 +14,10 @@ export class Player extends Schema {
   @type("number") level: number = 1;
   @type("number") experience: number = 0;
   @type("number") xpToNextLevel: number = 100;
+  @type("number") armor: number = 0;
+  @type("number") strength: number = 0;
+  @type("number") intelligence: number = 0;
+  @type("number") dexterity: number = 0;
+  @type("number") criticalChance: number = 0;
   @type([QuestProgress]) quests = new ArraySchema<QuestProgress>();
 }

@@ -276,6 +276,7 @@ export class WorldScene extends Phaser.Scene {
         this.setupSpellbarForClass(player.classId, player.className);
         this.hud?.setHealth(player.hp, player.maxHp);
         this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
+        this.syncCharacterStats(player);
 
         const syncQuestLog = () => {
           sidebar.setQuests(
@@ -308,6 +309,7 @@ export class WorldScene extends Phaser.Scene {
         if (isLocal) {
           this.hud?.setHealth(player.hp, player.maxHp);
           this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
+          this.syncCharacterStats(player);
         }
       });
     });
@@ -430,6 +432,22 @@ export class WorldScene extends Phaser.Scene {
     this.instructionText?.setText(
       `${className}    ${spellList}    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
     );
+  }
+
+  private syncCharacterStats(player: Player) {
+    sidebar.setStats({
+      className: player.className,
+      level: player.level,
+      experience: player.experience,
+      xpToNextLevel: player.xpToNextLevel,
+      hp: player.hp,
+      maxHp: player.maxHp,
+      armor: player.armor,
+      strength: player.strength,
+      intelligence: player.intelligence,
+      dexterity: player.dexterity,
+      criticalChance: player.criticalChance,
+    });
   }
 
   private createHpBar(x: number, y: number) {

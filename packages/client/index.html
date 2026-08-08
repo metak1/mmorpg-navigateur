@@ -34,12 +34,13 @@
 
       #sidebar-tabs {
         display: flex;
+        flex-wrap: wrap;
         gap: 4px;
         padding: 8px;
         border-bottom: 1px solid #333;
       }
       .sidebar-tab {
-        flex: 1;
+        flex: 1 1 40%;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -70,6 +71,33 @@
         font-size: 13px;
         padding: 12px;
       }
+
+      #stats-sheet { display: flex; flex-direction: column; gap: 4px; }
+      #stats-header { color: #fff; font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+      .stats-bar-label { color: #999; font-size: 11px; margin-top: 6px; }
+      .stats-bar-bg {
+        width: 100%;
+        height: 10px;
+        background: #111;
+        border: 1px solid #333;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-top: 2px;
+      }
+      .stats-bar-fill { height: 100%; }
+      .stats-bar-hp { background: #33dd55; }
+      .stats-bar-xp { background: #ffcc33; }
+      #stats-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid #2a2a2a;
+      }
+      .stats-row { display: flex; justify-content: space-between; font-size: 13px; }
+      .stats-label { color: #999; }
+      .stats-value { color: #fff; font-weight: 600; }
 
       #quest-log-list { display: flex; flex-direction: column; gap: 10px; }
       .quest-log-item {
@@ -335,6 +363,7 @@
           <span class="sidebar-tab" data-panel="chat">Chat <kbd>C</kbd></span>
           <span class="sidebar-tab" data-panel="inventory">Inventory <kbd>I</kbd></span>
           <span class="sidebar-tab" data-panel="quests">Quest Log <kbd>L</kbd></span>
+          <span class="sidebar-tab" data-panel="stats">Character <kbd>K</kbd></span>
         </div>
         <div id="sidebar-body">Coming soon</div>
       </aside>

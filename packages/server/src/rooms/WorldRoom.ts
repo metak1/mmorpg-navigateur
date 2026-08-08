@@ -603,6 +603,10 @@ export class WorldRoom extends Room<RoomState> {
     player.level = updated.level;
     player.experience = updated.experience;
     player.xpToNextLevel = xpToNextLevel(updated.level);
+    player.armor = updated.armor;
+    player.strength = updated.strength;
+    player.intelligence = updated.intelligence;
+    player.dexterity = updated.dexterity;
     if (hpGained > 0) {
       player.maxHp += hpGained;
       player.hp += hpGained;
@@ -995,6 +999,11 @@ export class WorldRoom extends Room<RoomState> {
     player.level = character.level;
     player.experience = character.experience;
     player.xpToNextLevel = xpToNextLevel(character.level);
+    player.armor = character.armor;
+    player.strength = character.strength;
+    player.intelligence = character.intelligence;
+    player.dexterity = character.dexterity;
+    player.criticalChance = character.criticalChance;
 
     this.state.players.set(client.sessionId, player);
     this.characterIds.set(client.sessionId, character.id);
