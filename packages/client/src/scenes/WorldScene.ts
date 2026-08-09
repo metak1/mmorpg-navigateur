@@ -38,6 +38,7 @@ import {
   TERRAIN_DEPTH,
   UI_DEPTH,
   TILE_COLORS,
+  TileType,
 } from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
 import { fetchActiveMap, fetchMapTiles, fetchSpells, fetchTalents, fetchMe } from "../net/api.js";
@@ -650,7 +651,11 @@ export class WorldScene extends Phaser.Scene {
     // elevations with a solid color — a simplified "riser" wall face, not
     // true 3D geometry. (worldX1,worldY1)-(worldX2,worldY2) is their shared
     // edge in raw world space; topElevation belongs to the higher (current)
-    // tile, bottomElevation to the lower neighbor.
+    // tile, bottomElevation to the lower neighbor. riserColor is the map's
+    // generic dirt cliffColor for ordinary terrain, but a Wall tile uses its
+    // own flat color instead — a wall block is meant to read as one solid
+    // color regardless of which elevation it happens to sit at, not grow a
+    // dirt-colored base the moment it's raised.
     const drawCliffFace = (
       worldX1: number,
       worldY1: number,
@@ -658,12 +663,13 @@ export class WorldScene extends Phaser.Scene {
       worldY2: number,
       topElevation: number,
       bottomElevation: number,
+      riserColor: number,
     ) => {
       const topShift = isoElevationOffset(topElevation, tileSize);
       const bottomShift = isoElevationOffset(bottomElevation, tileSize);
       const p1 = isoProject(worldX1, worldY1);
       const p2 = isoProject(worldX2, worldY2);
-      graphics.fillStyle(this.cliffColor, 1);
+      graphics.fillStyle(riserColor, 1);
       graphics.fillPoints(
         [
           { x: p1.x, y: p1.y - topShift },
@@ -679,7 +685,9 @@ export class WorldScene extends Phaser.Scene {
       const col = chunkCol * CHUNK_SIZE + c;
       const row = chunkRow * CHUNK_SIZE + r;
       const elevation = this.chunkCache.elevationAt(col, row);
-      const color = TILE_COLORS[this.chunkCache.tileAt(col, row)] ?? 0x000000;
+      const tileType = this.chunkCache.tileAt(col, row);
+      const color = TILE_COLORS[tileType] ?? 0x000000;
+      const riserColor = tileType === TileType.Wall ? color : this.cliffColor;
       const elevationShift = isoElevationOffset(elevation, tileSize);
 
       const worldLeft = col * tileSize;
@@ -713,10 +721,26 @@ export class WorldScene extends Phaser.Scene {
       const southElevation = this.chunkCache.elevationAt(col, row + 1);
       const westElevation = this.chunkCache.elevationAt(col - 1, row);
       if (elevation > eastElevation) {
-        drawCliffFace(worldLeft + tileSize, worldTop, worldLeft + tileSize, worldTop + tileSize, elevation, eastElevation);
+        drawCliffFace(
+          worldLeft + tileSize,
+          worldTop,
+          worldLeft + tileSize,
+          worldTop + tileSize,
+          elevation,
+          eastElevation,
+          riserColor,
+        );
       }
       if (elevation > southElevation) {
-        drawCliffFace(worldLeft, worldTop + tileSize, worldLeft + tileSize, worldTop + tileSize, elevation, southElevation);
+        drawCliffFace(
+          worldLeft,
+          worldTop + tileSize,
+          worldLeft + tileSize,
+          worldTop + tileSize,
+          elevation,
+          southElevation,
+          riserColor,
+        );
       }
 
       // A thin line along whichever top edges border a differently-elevated

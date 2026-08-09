@@ -2,27 +2,47 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <title>mmorpg-navigateur</title>
     <style>
-      html, body { margin: 0; background: #111; }
+      html, body {
+        margin: 0;
+        background: #111;
+        height: 100%;
+        overflow: hidden;
+      }
 
+      /* 100dvh (not 100vh) so mobile browser chrome that shows/hides on
+         scroll doesn't leave a stale gap sized for the taller viewport. */
       #game-layout {
         display: flex;
-        align-items: flex-start;
+        align-items: stretch;
         justify-content: center;
         gap: 16px;
-        height: 100vh;
+        width: 100vw;
+        height: 100dvh;
         padding: 16px;
         box-sizing: border-box;
       }
 
-      #app { flex: 0 0 auto; line-height: 0; }
+      /* Sized entirely by flex (fills whatever space isn't taken by the
+         sidebar); Phaser's scale manager (see main.ts's FIT mode) reads this
+         element's box each resize and scales the fixed-resolution canvas to
+         fit inside it, letterboxing rather than stretching so the game view
+         itself never changes regardless of device/window size. */
+      #app {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        line-height: 0;
+      }
 
-      /* One big panel that swaps content (chat by default). Height matches
-         the Phaser canvas (see VIEWPORT_HEIGHT in main.ts) so it lines up. */
+      /* One big panel that swaps content (chat by default). Stretches to
+         match #app's height (see #game-layout's align-items: stretch)
+         instead of a fixed pixel height, so it still lines up at any
+         viewport size. */
       #sidebar {
         flex: 0 0 300px;
-        height: 700px;
         display: flex;
         flex-direction: column;
         background: #1a1a1a;
@@ -30,6 +50,45 @@
         border-radius: 8px;
         overflow: hidden;
         font-family: sans-serif;
+      }
+
+      /* Hidden on wide screens — on a phone-width viewport, a 300px sidebar
+         sitting alongside the canvas leaves almost nothing for the game
+         itself, so below this breakpoint the sidebar becomes an off-canvas
+         overlay (see the media query below) opened/closed with this button
+         instead of always occupying screen width. */
+      #sidebar-toggle {
+        display: none;
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 40;
+        width: 40px;
+        height: 40px;
+        border-radius: 6px;
+        border: 1px solid #333;
+        background: #1a1a1a;
+        color: #fff;
+        font-size: 18px;
+        cursor: pointer;
+      }
+
+      @media (max-width: 700px) {
+        #sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+
+        #game-layout { gap: 0; padding: 0; }
+
+        #sidebar {
+          position: fixed;
+          inset: 0;
+          z-index: 30;
+          flex: none;
+          border: none;
+          border-radius: 0;
+          transform: translateX(100%);
+          transition: transform 0.2s ease;
+        }
+        #sidebar.open { transform: translateX(0); }
       }
 
       #sidebar-tabs {
@@ -230,22 +289,25 @@
         font-size: 9px;
         font-weight: 600;
       }
+      /* position:fixed + top/left set in JS (see Sidebar.renderTalents) —
+         the tree lives inside #sidebar-body's overflow-y:auto, so an
+         absolutely-positioned tooltip anchored above/below the node would
+         get clipped by that ancestor whenever the node is near the top or
+         bottom of the scroll area. Fixed positioning escapes that clipping
+         and lets the JS flip the tooltip above/below based on real
+         available space. */
       .talent-tooltip {
         display: none;
-        position: absolute;
-        bottom: calc(100% + 8px);
-        left: 50%;
-        transform: translateX(-50%);
+        position: fixed;
         width: 170px;
         padding: 8px;
         border: 1px solid #444;
         border-radius: 6px;
         background: #111;
         text-align: left;
-        z-index: 10;
+        z-index: 50;
         pointer-events: none;
       }
-      .talent-node-icon:hover .talent-tooltip { display: block; }
       .talent-tooltip-title { color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 3px; }
       .talent-tooltip-desc { color: #999; font-size: 11px; margin-bottom: 4px; }
       .talent-tooltip-rank { color: #ffcc33; font-size: 11px; font-weight: 600; }
@@ -338,6 +400,7 @@
       .auth-overlay {
         position: fixed;
         inset: 0;
+        z-index: 10;
         display: flex;
         justify-content: center;
         align-items: center;
@@ -526,6 +589,7 @@
     </div>
     <div id="game-layout">
       <div id="app"></div>
+      <button type="button" id="sidebar-toggle" aria-label="Toggle menu">☰</button>
       <aside id="sidebar">
         <div id="sidebar-tabs">
           <span class="sidebar-tab" data-panel="chat">Chat <kbd>C</kbd></span>

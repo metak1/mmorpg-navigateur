@@ -456,7 +456,10 @@ export function renderMapEditor(
   // elevations with a solid color — a simplified "riser" wall face (not
   // true 3D geometry). (worldX1,worldY1)-(worldX2,worldY2) is their shared
   // edge in raw world space; topElevation belongs to the higher (current)
-  // tile, bottomElevation to the lower neighbor.
+  // tile, bottomElevation to the lower neighbor. riserColor is the map's
+  // generic dirt cliffColor for ordinary terrain, but a Wall tile uses its
+  // own flat color instead — a wall block should read as one solid color
+  // regardless of which elevation it's placed at.
   function drawCliffFace(
     worldX1: number,
     worldY1: number,
@@ -465,13 +468,14 @@ export function renderMapEditor(
     topElevation: number,
     bottomElevation: number,
     tileSize: number,
+    riserColor: string,
   ) {
     const top1 = worldToScreen(worldX1, worldY1, topElevation, tileSize);
     const top2 = worldToScreen(worldX2, worldY2, topElevation, tileSize);
     const bottom1 = worldToScreen(worldX1, worldY1, bottomElevation, tileSize);
     const bottom2 = worldToScreen(worldX2, worldY2, bottomElevation, tileSize);
 
-    ctx.fillStyle = numberToCssColor(state.cliffColor);
+    ctx.fillStyle = riserColor;
     ctx.beginPath();
     ctx.moveTo(top1.x, top1.y);
     ctx.lineTo(top2.x, top2.y);
@@ -534,7 +538,10 @@ export function renderMapEditor(
         return { x: p.x + (dx / len) * SEAM_PAD, y: p.y + (dy / len) * SEAM_PAD };
       });
 
-      ctx.fillStyle = TILE_COLORS[cell.tileType] ?? "#000000";
+      const cellColor = TILE_COLORS[cell.tileType] ?? "#000000";
+      const riserColor = cell.tileType === TileType.Wall ? cellColor : numberToCssColor(state.cliffColor);
+
+      ctx.fillStyle = cellColor;
       ctx.beginPath();
       ctx.moveTo(padded[0].x, padded[0].y);
       for (let i = 1; i < padded.length; i++) ctx.lineTo(padded[i].x, padded[i].y);
@@ -576,6 +583,7 @@ export function renderMapEditor(
           cell.elevation,
           eastNeighbor.elevation,
           tileSize,
+          riserColor,
         );
       }
       const southNeighbor = cellAt(col, row + 1);
@@ -588,6 +596,7 @@ export function renderMapEditor(
           cell.elevation,
           southNeighbor.elevation,
           tileSize,
+          riserColor,
         );
       }
 

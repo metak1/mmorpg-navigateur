@@ -144,6 +144,15 @@ export class Sidebar {
       if (panel) this.show(panel);
     });
 
+    // Below the index.html max-width:700px breakpoint, #sidebar becomes a
+    // fixed off-canvas overlay instead of sitting alongside the game canvas
+    // (a 300px sidebar next to the canvas leaves almost nothing for the game
+    // on a phone) — this button is the only way to open/close it there;
+    // above the breakpoint it's hidden by CSS and the "open" class is inert.
+    const sidebarEl = document.querySelector<HTMLElement>("#sidebar")!;
+    const toggleEl = document.querySelector<HTMLElement>("#sidebar-toggle")!;
+    toggleEl.addEventListener("click", () => sidebarEl.classList.toggle("open"));
+
     this.show(DEFAULT_PANEL);
   }
 
@@ -493,6 +502,33 @@ export class Sidebar {
         tooltip.append(tooltipTitle, tooltipDesc, tooltipRank);
         icon.appendChild(tooltip);
 
+        // Positioned in JS (fixed, not CSS-anchored to the icon) so it can
+        // flip above/below based on real available space and clamp
+        // horizontally to the viewport — see the .talent-tooltip comment in
+        // index.html for why a pure-CSS anchor gets clipped near the edges
+        // of the scrollable talent tree.
+        const gap = 8;
+        icon.addEventListener("mouseenter", () => {
+          tooltip.style.display = "block";
+          const iconRect = icon.getBoundingClientRect();
+          const tooltipRect = tooltip.getBoundingClientRect();
+          const showBelow = iconRect.top < tooltipRect.height + gap;
+          tooltip.style.top = showBelow
+            ? `${iconRect.bottom + gap}px`
+            : `${iconRect.top - tooltipRect.height - gap}px`;
+          const left = Math.max(
+            4,
+            Math.min(
+              iconRect.left + iconRect.width / 2 - tooltipRect.width / 2,
+              window.innerWidth - tooltipRect.width - 4,
+            ),
+          );
+          tooltip.style.left = `${left}px`;
+        });
+        icon.addEventListener("mouseleave", () => {
+          tooltip.style.display = "none";
+        });
+
         row.appendChild(icon);
         nodeEls.set(talent.id, icon);
       }
@@ -502,24 +538,36 @@ export class Sidebar {
     wrapper.appendChild(tree);
     this.bodyEl.appendChild(wrapper);
 
-    // Node positions (offsetLeft/offsetTop) only reflect real layout once
-    // the browser has actually laid the tree out, which hasn't necessarily
-    // happened synchronously right after appending — deferring to the next
-    // frame guarantees it has.
+    // Node positions only reflect real layout once the browser has actually
+    // laid the tree out, which hasn't necessarily happened synchronously
+    // right after appending — deferring to the next frame guarantees it has.
     requestAnimationFrame(() => {
       svg.setAttribute("width", String(tree.scrollWidth));
       svg.setAttribute("height", String(tree.scrollHeight));
+      const treeRect = tree.getBoundingClientRect();
       for (const talent of data.defs) {
         if (!talent.prerequisiteId) continue;
         const from = nodeEls.get(talent.prerequisiteId);
         const to = nodeEls.get(talent.id);
         if (!from || !to) continue;
 
+        // getBoundingClientRect (not offsetLeft/offsetTop) because each icon's
+        // offsetParent is its own .talent-tier-row (position: relative), not
+        // the tree — offsetLeft/Top would be relative to different rows per
+        // node instead of one shared coordinate space, scattering the lines.
+        const fromRect = from.getBoundingClientRect();
+        const toRect = to.getBoundingClientRect();
+
+        // Edge-to-edge (bottom of the prerequisite to top of the dependent),
+        // not center-to-center — a center-to-center line cuts straight
+        // through both icon squares (and the rank badge) instead of just
+        // connecting them. Tiers render top-to-bottom in ascending order, so
+        // the prerequisite is always the one above.
         const line = document.createElementNS(svgNs, "line");
-        line.setAttribute("x1", String(from.offsetLeft + from.offsetWidth / 2));
-        line.setAttribute("y1", String(from.offsetTop + from.offsetHeight / 2));
-        line.setAttribute("x2", String(to.offsetLeft + to.offsetWidth / 2));
-        line.setAttribute("y2", String(to.offsetTop + to.offsetHeight / 2));
+        line.setAttribute("x1", String(fromRect.left + fromRect.width / 2 - treeRect.left));
+        line.setAttribute("y1", String(fromRect.bottom - treeRect.top));
+        line.setAttribute("x2", String(toRect.left + toRect.width / 2 - treeRect.left));
+        line.setAttribute("y2", String(toRect.top - treeRect.top));
         line.setAttribute("class", `talent-line${(learnedRanks.get(talent.prerequisiteId) ?? 0) > 0 ? " active" : ""}`);
         svg.appendChild(line);
       }

@@ -91,6 +91,17 @@ function startGame(token: string, characterId: string) {
     parent: "app",
     backgroundColor: "#222222",
     disableContextMenu: true,
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH,
+      // #app is already sized by CSS flexbox (see index.html) to fill
+      // whatever space the 300px sidebar leaves — letting Phaser also
+      // resize it (the default) would fight that layout, so it's told to
+      // only scale the canvas to fit the box, not manage the box itself.
+      expandParent: false,
+      width: VIEWPORT_WIDTH,
+      height: VIEWPORT_HEIGHT,
+    },
   });
 
   game.scene.add("world", WorldScene, true, { token, characterId });
