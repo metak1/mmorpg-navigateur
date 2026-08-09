@@ -3,9 +3,7 @@ import pg from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 import {
-  DEFAULT_MAP_DATA,
-  DEFAULT_MAP_COLS,
-  DEFAULT_MAP_ROWS,
+  DEFAULT_SEED_TILES,
   DEFAULT_TILE_SIZE,
   DEFAULT_SPAWN_X,
   DEFAULT_SPAWN_Y,
@@ -239,13 +237,10 @@ async function seedMapAndMonsters() {
     },
   });
 
-  await prisma.gameMap.create({
+  const map = await prisma.gameMap.create({
     data: {
       name: "Default Map",
-      width: DEFAULT_MAP_COLS,
-      height: DEFAULT_MAP_ROWS,
       tileSize: DEFAULT_TILE_SIZE,
-      tileData: JSON.stringify(DEFAULT_MAP_DATA),
       spawnX: DEFAULT_SPAWN_X,
       spawnY: DEFAULT_SPAWN_Y,
       isActive: true,
@@ -256,10 +251,25 @@ async function seedMapAndMonsters() {
           y: spawn.y,
         })),
       },
+      ambientSpawns: {
+        create: [{ monsterTemplateId: monsterTemplate.id, weight: 1 }],
+      },
     },
   });
 
-  console.log("Seeded 1 monster template, 1 active map with 2 spawns.");
+  await prisma.mapTile.createMany({
+    data: DEFAULT_SEED_TILES.map((tile) => ({
+      mapId: map.id,
+      col: tile.col,
+      row: tile.row,
+      tileType: tile.tileType,
+      elevation: tile.elevation,
+    })),
+  });
+
+  console.log(
+    `Seeded 1 monster template, 1 active map with 2 hand-placed spawns + ambient spawning, ${DEFAULT_SEED_TILES.length} painted tiles.`,
+  );
 }
 
 async function main() {

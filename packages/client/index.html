@@ -99,6 +99,23 @@
       .stats-label { color: #999; }
       .stats-value { color: #fff; font-weight: 600; }
 
+      #admin-tools {
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid #2a2a2a;
+      }
+      #admin-tools button {
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: 1px solid #ff9d2e;
+        background: #2a1f10;
+        color: #ff9d2e;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      #admin-tools button:hover { background: #3a2a14; }
+
       /* Rarity accents, reused for both equipped slots and bag rows. */
       .rarity-common { border-color: #555 !important; }
       .rarity-rare { border-color: #4d9fff !important; }
@@ -164,6 +181,74 @@
         font-weight: bold;
         cursor: pointer;
       }
+
+      #talent-points { color: #ffcc33; font-size: 13px; font-weight: 600; margin-bottom: 16px; }
+      /* Node positions are plain block-flow (one flex row per tier); the
+         connector lines are an absolutely-positioned SVG overlay drawn on
+         top once the nodes are laid out — see Sidebar.renderTalents. */
+      #talent-tree { position: relative; }
+      #talent-lines { position: absolute; top: 0; left: 0; pointer-events: none; }
+      .talent-line { stroke: #3a3a3a; stroke-width: 2; }
+      .talent-line.active { stroke: #ffcc33; }
+      .talent-tier-row {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 28px;
+        margin-bottom: 40px;
+      }
+      .talent-node-icon {
+        position: relative;
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid #333;
+        border-radius: 6px;
+        background: #1a1a1a;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 700;
+        user-select: none;
+      }
+      .talent-node-icon.learnable { border-color: #00ff88; cursor: pointer; }
+      .talent-node-icon.learnable:hover { background: #232323; }
+      .talent-node-icon.maxed { border-color: #4d9fff; }
+      .talent-node-icon.locked { opacity: 0.4; }
+      .talent-node-rank-badge {
+        position: absolute;
+        right: -6px;
+        bottom: -6px;
+        padding: 1px 3px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: #000;
+        color: #ccc;
+        font-size: 9px;
+        font-weight: 600;
+      }
+      .talent-tooltip {
+        display: none;
+        position: absolute;
+        bottom: calc(100% + 8px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: 170px;
+        padding: 8px;
+        border: 1px solid #444;
+        border-radius: 6px;
+        background: #111;
+        text-align: left;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .talent-node-icon:hover .talent-tooltip { display: block; }
+      .talent-tooltip-title { color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+      .talent-tooltip-desc { color: #999; font-size: 11px; margin-bottom: 4px; }
+      .talent-tooltip-rank { color: #ffcc33; font-size: 11px; font-weight: 600; }
 
       #quest-log-list, #quest-log-completed-list { display: flex; flex-direction: column; gap: 10px; }
       .quest-log-item {
@@ -447,6 +532,7 @@
           <span class="sidebar-tab" data-panel="inventory">Inventory <kbd>I</kbd></span>
           <span class="sidebar-tab" data-panel="quests">Quest Log <kbd>L</kbd></span>
           <span class="sidebar-tab" data-panel="stats">Character <kbd>K</kbd></span>
+          <span class="sidebar-tab" data-panel="talents">Talents <kbd>T</kbd></span>
         </div>
         <div id="sidebar-body">Coming soon</div>
       </aside>

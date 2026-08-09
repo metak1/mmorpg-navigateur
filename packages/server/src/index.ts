@@ -14,6 +14,7 @@ import { charactersRouter } from "./api/characters.js";
 import { npcsRouter } from "./api/npcs.js";
 import { itemsRouter } from "./api/items.js";
 import { questsRouter } from "./api/quests.js";
+import { talentsRouter } from "./api/talents.js";
 
 const port = Number(process.env.PORT ?? 2567);
 // Bind all interfaces in production (most hosts route traffic to the
@@ -38,6 +39,7 @@ app.use("/api/characters", charactersRouter);
 app.use("/api/npcs", npcsRouter);
 app.use("/api/items", itemsRouter);
 app.use("/api/quests", questsRouter);
+app.use("/api/talents", talentsRouter);
 
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

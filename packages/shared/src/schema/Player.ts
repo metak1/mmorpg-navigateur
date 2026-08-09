@@ -19,5 +19,9 @@ export class Player extends Schema {
   @type("number") intelligence: number = 0;
   @type("number") dexterity: number = 0;
   @type("number") criticalChance: number = 0;
+  // Unspent talent points, derived server-side from level + ranks already
+  // learned (see stats.ts's talentPointsForLevel) — not itself persisted,
+  // recomputed on every stat-affecting event (see WorldRoom.applyStatsToPlayer).
+  @type("number") talentPoints: number = 0;
   @type([QuestProgress]) quests = new ArraySchema<QuestProgress>();
 }

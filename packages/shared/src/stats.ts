@@ -40,6 +40,15 @@ export function xpToNextLevel(level: number): number {
   return 100 * level;
 }
 
+// Characters start earning talent points once they're deep enough into
+// progression that a real tree is worth having — 1 point per level from
+// here on, none before it.
+export const TALENT_POINT_START_LEVEL = 10;
+
+export function talentPointsForLevel(level: number): number {
+  return level >= TALENT_POINT_START_LEVEL ? level - TALENT_POINT_START_LEVEL + 1 : 0;
+}
+
 export function primaryStatValue(
   className: string,
   stats: Pick<CombatStats, "strength" | "intelligence" | "dexterity">,

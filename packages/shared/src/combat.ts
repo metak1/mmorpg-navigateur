@@ -11,12 +11,12 @@ export const GLOBAL_COOLDOWN_MS = 1000;
 // monster stats/spawns from the database via the content backend.
 export const DEFAULT_MONSTER_MAX_HP = 100;
 
-// Fixed spawn points on open grass tiles (verified against the default map
-// grid in shared/src/map.ts: away from the pond at rows 3-5/cols 5-8 and the
-// wall obstacles at (12,15) (12,16) (13,15)).
+// Fixed spawn points on open grass tiles (verified against the default seed
+// patch in shared/src/map.ts: away from the pond at rows -5..-3/cols -2..2,
+// the path at row 0, and the wall obstacles at (4,3) (5,3) (-7,2)).
 export const DEFAULT_MONSTER_SPAWNS: Array<{ x: number; y: number }> = [
-  { x: 496, y: 112 }, // row 3, col 15
-  { x: 656, y: 432 }, // row 13, col 20
+  { x: 272, y: 112 }, // col 8, row 3
+  { x: -240, y: -48 }, // col -8, row -2
 ];
 
 // Monster AI defaults

@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "GameMap" ADD COLUMN     "cliffColor" INTEGER NOT NULL DEFAULT 7031343;

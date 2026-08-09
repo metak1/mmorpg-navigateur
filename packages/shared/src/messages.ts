@@ -56,6 +56,16 @@ export interface CastFizzledMessage {
   spellId: SpellId;
 }
 
+// Sent back to the casting client only, rejecting a cast at the moment it's
+// requested (before any cast-time delay, GCD, or cooldown is spent) — e.g.
+// no line of sight to the target/point. Distinct from CastFizzledMessage,
+// which reports a cast that was already accepted and is unwinding after the
+// fact.
+export interface CastFailedMessage {
+  spellId: SpellId;
+  reason: string;
+}
+
 // Client -> server: interact with an NPC (approaches it and clicks/presses
 // interact). The server replies with "npcDialogue" describing what that NPC
 // currently has to say to this character.
@@ -158,6 +168,45 @@ export interface EquippedItemView {
 export interface InventoryStateMessage {
   items: InventoryItemView[];
   equipped: EquippedItemView[];
+}
+
+// Client -> server: spend one available talent point on this talent
+// (bumping its rank by 1). Rejected (see TalentActionFailedMessage) if the
+// prerequisite isn't met, it's already at max rank, or no points are free —
+// see shared/src/talents.ts's canLearnTalent, the single rule both server
+// and client evaluate.
+export interface LearnTalentMessage {
+  talentId: string;
+}
+
+export interface TalentActionFailedMessage {
+  reason: string;
+}
+
+export interface LearnedTalentView {
+  talentId: string;
+  rank: number;
+}
+
+// Client -> server: admin-only debug command that fast-forwards the sending
+// character straight to `level`, granting exactly the XP needed via the
+// same grantExperience growth curve a normal level-up uses (so stats/HP
+// grow correctly, not just the level number) — lets an admin unlock
+// level-gated features like talent points instantly while testing, without
+// grinding. Silently ignored server-side (see WorldRoom.handleAdminSetLevel)
+// if the connected account isn't an admin.
+export interface AdminSetLevelMessage {
+  level: number;
+}
+
+// Pushed to the owning client at join and after every learnTalent — private
+// per-character data, same "push on demand rather than synced room state"
+// rationale as InventoryStateMessage. `points` is redundant with the synced
+// Player.talentPoints field but included so the talent panel can render
+// standalone off one message without also subscribing to schema changes.
+export interface TalentStateMessage {
+  points: number;
+  learned: LearnedTalentView[];
 }
 
 // Sent to the killing player only, once per monster death, listing every

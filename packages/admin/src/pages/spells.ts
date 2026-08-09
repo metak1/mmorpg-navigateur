@@ -19,7 +19,16 @@ const BASE_FIELDS: FieldSpec[] = [
       { value: "aoe", label: "AOE" },
       { value: "heal", label: "Heal (self)" },
       { value: "slow", label: "Slow/Root" },
-      { value: "groundAoe", label: "Ground AOE (dmg enemies + heal allies)" },
+      { value: "groundAoe", label: "Ground AOE" },
+    ],
+  },
+  {
+    name: "groundAoeEffect",
+    label: "Ground AOE Effect",
+    type: "select",
+    options: [
+      { value: "damage", label: "Damage (enemies)" },
+      { value: "heal", label: "Heal (allies)" },
     ],
   },
   { name: "cooldownMs", label: "Cooldown (ms)", type: "number" },
@@ -38,6 +47,11 @@ const BASE_FIELDS: FieldSpec[] = [
 function toInput(values: Record<string, string>): SpellTemplateInput {
   const kind = values.kind as SpellKind;
   const num = (key: string): number | null => (values[key] === "" ? null : Number(values[key]));
+  // A groundAoe spell is one or the other, never both — whichever of the two
+  // amounts doesn't match the chosen effect is forced to null regardless of
+  // what's still sitting in that (hidden) field, so it's impossible to save
+  // a groundAoe spell that does both.
+  const groundAoeEffect = values.groundAoeEffect;
 
   return {
     classId: values.classId,
@@ -48,32 +62,36 @@ function toInput(values: Record<string, string>): SpellTemplateInput {
     castTimeMs: Number(values.castTimeMs),
     color: Number(values.color),
     size: Number(values.size),
-    damage: kind === "heal" ? null : num("damage"),
+    damage: kind === "heal" ? null : kind === "groundAoe" ? (groundAoeEffect === "damage" ? num("damage") : null) : num("damage"),
     projectileSpeed: kind === "heal" || kind === "groundAoe" ? null : num("projectileSpeed"),
     maxRange: kind === "heal" ? null : num("maxRange"),
     aoeRadius: kind === "aoe" || kind === "groundAoe" ? num("aoeRadius") : null,
     slowMultiplier: kind === "slow" ? num("slowMultiplier") : null,
     slowDurationMs: kind === "slow" ? num("slowDurationMs") : null,
-    healAmount: kind === "heal" || kind === "groundAoe" ? num("healAmount") : null,
+    healAmount:
+      kind === "heal" ? num("healAmount") : kind === "groundAoe" ? (groundAoeEffect === "heal" ? num("healAmount") : null) : null,
   };
 }
 
 function updateFieldVisibility(form: HTMLFormElement) {
   const kindSelect = form.querySelector<HTMLSelectElement>('[name="kind"]');
   const kind = kindSelect?.value;
+  const groundAoeEffect = form.querySelector<HTMLSelectElement>('[name="groundAoeEffect"]')?.value;
+  const isGroundAoe = kind === "groundAoe";
 
   const setVisible = (name: string, visible: boolean) => {
     const el = form.querySelector<HTMLElement>(`[data-field="${name}"]`);
     if (el) el.style.display = visible ? "" : "none";
   };
 
-  setVisible("damage", kind !== "heal");
-  setVisible("projectileSpeed", kind !== "heal" && kind !== "groundAoe");
+  setVisible("groundAoeEffect", isGroundAoe);
+  setVisible("damage", isGroundAoe ? groundAoeEffect === "damage" : kind !== "heal");
+  setVisible("projectileSpeed", kind !== "heal" && !isGroundAoe);
   setVisible("maxRange", kind !== "heal");
-  setVisible("aoeRadius", kind === "aoe" || kind === "groundAoe");
+  setVisible("aoeRadius", kind === "aoe" || isGroundAoe);
   setVisible("slowMultiplier", kind === "slow");
   setVisible("slowDurationMs", kind === "slow");
-  setVisible("healAmount", kind === "heal" || kind === "groundAoe");
+  setVisible("healAmount", isGroundAoe ? groundAoeEffect === "heal" : kind === "heal");
 }
 
 export async function renderSpellsPage(container: HTMLElement) {
@@ -95,6 +113,7 @@ export async function renderSpellsPage(container: HTMLElement) {
     keybind: 1,
     name: "New Spell",
     kind: "single",
+    groundAoeEffect: "damage",
     cooldownMs: 500,
     castTimeMs: 0,
     color: "0xffee55",
@@ -175,6 +194,7 @@ export async function renderSpellsPage(container: HTMLElement) {
     );
 
     form.querySelector<HTMLSelectElement>('[name="kind"]')?.addEventListener("change", () => updateFieldVisibility(form));
+    form.querySelector<HTMLSelectElement>('[name="groundAoeEffect"]')?.addEventListener("change", () => updateFieldVisibility(form));
     updateFieldVisibility(form);
 
     if (editingId) {
@@ -214,6 +234,11 @@ export async function renderSpellsPage(container: HTMLElement) {
               keybind: row.keybind,
               name: row.name,
               kind: row.kind,
+              // Existing rows don't carry this choice explicitly — infer it
+              // from whichever amount is actually set (falls back to
+              // "damage" if somehow neither/both are, matching the new-spell
+              // default).
+              groundAoeEffect: row.healAmount ? "heal" : "damage",
               cooldownMs: row.cooldownMs,
               castTimeMs: row.castTimeMs,
               color: `0x${row.color.toString(16)}`,

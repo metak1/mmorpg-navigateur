@@ -45,18 +45,20 @@ model Character {
   items          CharacterItem[]
   quests         CharacterQuest[]
   equipment      CharacterEquipment[]
+  talents        CharacterTalent[]
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 }
 
 model ClassTemplate {
-  id         String          @id @default(cuid())
-  name       String          @unique
+  id         String           @id @default(cuid())
+  name       String           @unique
   color      Int
   spells     SpellTemplate[]
+  talents    TalentTemplate[]
   characters Character[]
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 }
 
 model MonsterTemplate {
@@ -77,6 +79,7 @@ model MonsterTemplate {
   spawns             MonsterSpawn[]
   quests             Quest[]
   drops              MonsterDrop[]
+  ambientSpawnOf     MapAmbientSpawn[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -115,26 +118,125 @@ model SpellTemplate {
   slowMultiplier  Float?
   slowDurationMs  Int?
   healAmount      Float?
+  talentEffects   TalentEffect[]
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
   @@unique([classId, keybind])
 }
 
+// A talent tree node belonging to one class. tier is a display/authoring
+// grouping (row in the tree); prerequisite optionally requires another
+// talent in the same tree to have >=1 point spent before this one is
+// learnable (see shared/src/talents.ts's canLearnTalent, the single rule
+// both server and client evaluate). maxRank lets a talent be bought
+// multiple times, scaling its effects linearly per rank (see TalentEffect).
+model TalentTemplate {
+  id             String           @id @default(cuid())
+  classId        String
+  class          ClassTemplate    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  name           String
+  description    String
+  tier           Int              @default(1)
+  maxRank        Int              @default(1)
+  prerequisiteId String?
+  // SetNull (not Cascade) so deleting a prerequisite talent doesn't cascade
+  // into deleting every talent that required it — it just becomes
+  // unconditionally learnable instead.
+  prerequisite   TalentTemplate?  @relation("TalentPrerequisite", fields: [prerequisiteId], references: [id], onDelete: SetNull)
+  dependents     TalentTemplate[] @relation("TalentPrerequisite")
+  effects        TalentEffect[]
+  characterTalents CharacterTalent[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+}
+
+enum TalentEffectType {
+  statBonus
+  spellModifier
+  mechanicFlag
+}
+
+enum TalentBonusMode {
+  flat
+  percent
+}
+
+// One effect a talent applies per rank spent on it. Which fields are
+// meaningful depends on effectType: statBonus uses statKey; spellModifier
+// uses spellTemplateId+spellParam; both use bonusMode+valuePerRank.
+// mechanicFlag only uses flagName — it's plumbing for a fixed, growing set
+// of named bespoke gameplay hooks (see shared/src/api-types.ts's
+// TALENT_MECHANIC_FLAGS) with no numeric effect of its own; the actual
+// gameplay behavior behind each flag name is implemented in server code
+// separately, one at a time, as requested.
+model TalentEffect {
+  id               String            @id @default(cuid())
+  talentTemplateId String
+  talentTemplate   TalentTemplate    @relation(fields: [talentTemplateId], references: [id], onDelete: Cascade)
+  effectType       TalentEffectType
+  statKey          String?
+  spellTemplateId  String?
+  spellTemplate    SpellTemplate?    @relation(fields: [spellTemplateId], references: [id], onDelete: Cascade)
+  spellParam       String?
+  bonusMode        TalentBonusMode?
+  valuePerRank     Float?
+  flagName         String?
+}
+
 model GameMap {
-  id        String   @id @default(cuid())
-  name      String
-  width     Int
-  height    Int
-  tileSize  Int      @default(32)
-  tileData  String
-  spawnX    Float
-  spawnY    Float
-  isActive  Boolean  @default(false)
-  spawns    MonsterSpawn[]
-  npcSpawns NpcSpawn[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 String   @id @default(cuid())
+  name               String
+  tileSize           Int      @default(32)
+  spawnX             Float
+  spawnY             Float
+  isActive           Boolean  @default(false)
+  // Probability (0-1), rolled once per newly-entered chunk per player, that
+  // one ambient monster spawns somewhere walkable in that chunk — see
+  // MapAmbientSpawn for which monsters are eligible.
+  ambientSpawnChance Float    @default(0.3)
+  // Solid fill color (0xrrggbb) for the "riser" face drawn between two
+  // adjacent tiles with different elevation — e.g. brown for a dirt cliff,
+  // gray for stone. Purely cosmetic, rendered client-side only. Default is
+  // a dirt brown (0x6b4a2f).
+  cliffColor         Int      @default(7031343)
+  spawns             MonsterSpawn[]
+  npcSpawns          NpcSpawn[]
+  tiles              MapTile[]
+  ambientSpawns      MapAmbientSpawn[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+// Sparse hand-painted terrain: only tiles an admin explicitly painted get a
+// row here. Any (col,row) with no row is a "default" walkable Grass tile —
+// this (not width/height) is what makes the map infinite: there is no edge,
+// just an ever-larger sparse set of overrides on top of a Grass default.
+model MapTile {
+  id        String  @id @default(cuid())
+  mapId     String
+  map       GameMap @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  col       Int
+  row       Int
+  tileType  Int
+  // Height level, relative to the default (0). Movement between adjacent
+  // tiles whose elevation differs by more than MAX_ELEVATION_STEP is
+  // blocked (see shared/src/map.ts) and higher tiles render visually
+  // raised in the isometric client.
+  elevation Int     @default(0)
+
+  @@unique([mapId, col, row])
+}
+
+// Which monster templates can spawn procedurally as players wander into
+// unauthored chunks, and their relative pick weight.
+model MapAmbientSpawn {
+  id                String          @id @default(cuid())
+  mapId             String
+  map               GameMap         @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  monsterTemplateId String
+  monsterTemplate   MonsterTemplate @relation(fields: [monsterTemplateId], references: [id], onDelete: Cascade)
+  weight            Float           @default(1)
 }
 
 model MonsterSpawn {
@@ -252,6 +354,24 @@ model CharacterEquipment {
   item        ItemTemplate  @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
   @@unique([characterId, slot])
+}
+
+// Points a character has spent on a talent, and at what rank. Unlike
+// CharacterItem/CharacterEquipment (which persist eagerly but only reflect
+// what's currently owned/worn), this is a one-way ratchet — rank only ever
+// increases, there's no "unlearn" flow, matching the (recommended) minimal
+// scope of the in-game talent panel.
+model CharacterTalent {
+  id          String         @id @default(cuid())
+  characterId String
+  character   Character      @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  talentId    String
+  talent      TalentTemplate @relation(fields: [talentId], references: [id], onDelete: Cascade)
+  rank        Int            @default(1)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([characterId, talentId])
 }
 
 enum QuestObjectiveType {

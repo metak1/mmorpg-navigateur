@@ -5,6 +5,7 @@ import { renderMapsPage } from "./pages/maps.js";
 import { renderNpcsPage } from "./pages/npcs.js";
 import { renderItemsPage } from "./pages/items.js";
 import { renderQuestsPage } from "./pages/quests.js";
+import { renderTalentsPage } from "./pages/talents.js";
 import { getToken, setToken, clearToken } from "./auth.js";
 import { login, api } from "./api.js";
 
@@ -21,6 +22,7 @@ const routes: Record<string, (container: HTMLElement) => void | Promise<void>> =
   npcs: renderNpcsPage,
   items: renderItemsPage,
   quests: renderQuestsPage,
+  talents: renderTalentsPage,
 };
 
 function renderLogin() {

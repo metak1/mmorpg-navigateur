@@ -2,7 +2,18 @@ import { Room, Client, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import { onContentChanged } from "../contentEvents.js";
 import { verifyToken } from "../auth/jwt.js";
-import type { MonsterTemplate, MonsterDrop, SpellTemplate, Quest, QuestRewardItem, ItemTemplate, NpcTemplate } from "@prisma/client";
+import type {
+  MonsterTemplate,
+  MonsterDrop,
+  MapAmbientSpawn,
+  SpellTemplate,
+  Quest,
+  QuestRewardItem,
+  ItemTemplate,
+  NpcTemplate,
+  TalentTemplate,
+  TalentEffect,
+} from "@prisma/client";
 import {
   Player,
   Monster,
@@ -16,6 +27,10 @@ import {
   getTileAt,
   isWalkable,
   hasLineOfSight,
+  ChunkTileCache,
+  CHUNK_SIZE,
+  chunkKeyFor,
+  chunkOriginFromKey,
   MONSTER_RESPAWN_MS,
   PLAYER_MAX_HP,
   PLAYER_RESPAWN_INVULNERABLE_MS,
@@ -26,13 +41,15 @@ import {
   grantExperience,
   xpToNextLevel,
   HP_PER_LEVEL,
-  type TileGrid,
+  talentPointsForLevel,
+  canLearnTalent,
   type JoinOptions,
   type MoveInputMessage,
   type CastInputMessage,
   type HealEventMessage,
   type GroundAoeEventMessage,
   type CastFizzledMessage,
+  type CastFailedMessage,
   type TalkMessage,
   type AcceptQuestMessage,
   type TurnInQuestMessage,
@@ -46,6 +63,11 @@ import {
   type InventoryStateMessage,
   type LootDroppedMessage,
   type CompletedQuestsStateMessage,
+  type LearnTalentMessage,
+  type TalentActionFailedMessage,
+  type TalentStateMessage,
+  type AdminSetLevelMessage,
+  type TalentSpellParam,
   type EquipmentSlot,
   type ItemSlotType,
   type ItemRarity,
@@ -57,6 +79,18 @@ import {
 
 const SIMULATION_INTERVAL_MS = 1000 / 30;
 const MONSTER_COLLISION_RADIUS = 14;
+// Chunks of terrain are preloaded in a radius around each player this many
+// chunks wide/tall, on a throttled interval — see preloadChunksAroundPlayers.
+const CHUNK_PRELOAD_RADIUS = 3;
+const CHUNK_PRELOAD_INTERVAL_MS = 500;
+// Hard ceiling on procedurally-spawned (not hand-placed) monsters that can
+// ever exist in one room's lifetime — there's no interest management in
+// this codebase (every client is sent every entity regardless of distance),
+// so this bounds worst-case sync/simulation cost at a fixed number rather
+// than letting it grow forever as players explore. Gates new ambient spawn
+// rolls only; once created, an ambient monster still respawns forever at
+// its rolled position via the same timer hand-placed spawns use.
+const MAX_AMBIENT_MONSTERS = 150;
 
 type MonsterTemplateWithDrops = MonsterTemplate & { drops: MonsterDrop[] };
 
@@ -94,6 +128,31 @@ const EMPTY_EQUIPMENT_BONUS: EquipmentBonusTotals = {
   hp: 0,
 };
 
+function applyPercent(value: number, percent: number): number {
+  return value * (1 + percent / 100);
+}
+
+type TalentTemplateFull = TalentTemplate & { effects: TalentEffect[] };
+
+// A statBonus talent's flat and percent contributions are kept separate
+// (not pre-merged into one number) because percent has to be applied on top
+// of base+equipment+flat *every time those change* (level-up growing a base
+// stat, gear swapping) — see getEffectiveStats/applyStatsToPlayer, the only
+// two places this is ever read.
+interface StatBonusSplit {
+  flat: EquipmentBonusTotals;
+  percent: EquipmentBonusTotals;
+}
+
+const EMPTY_TALENT_BONUS: StatBonusSplit = { flat: EMPTY_EQUIPMENT_BONUS, percent: EMPTY_EQUIPMENT_BONUS };
+
+function sumTalentRanks(learned: Map<string, number> | undefined): number {
+  if (!learned) return 0;
+  let total = 0;
+  for (const rank of learned.values()) total += rank;
+  return total;
+}
+
 type QuestFull = Quest & {
   targetNpc: NpcTemplate | null;
   monsterTemplate: MonsterTemplate | null;
@@ -128,14 +187,36 @@ export class WorldRoom extends Room<RoomState> {
   private invulnerableUntil = new Map<string, number>();
   private characterIds = new Map<string, string>();
   private characterStats = new Map<string, CombatStats>();
+  // Whether the account behind this session is an admin — set once at
+  // onJoin from the JWT payload (already carries the account's role, no
+  // extra DB query needed), read by handleAdminSetLevel to gate debug
+  // commands. Not itself sent to any client.
+  private isAdmin = new Map<string, boolean>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
   private npcRuntime = new Map<string, NpcRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
   private projectileSeq = 0;
 
-  private mapGrid: TileGrid = { tileData: [[0]], tileSize: 32, cols: 1, rows: 1 };
+  // Built once in onCreate (map.id isn't known before then) — every
+  // collision/LoS/prediction call site below reads through this rather than
+  // a bounded grid, since the world has no edges.
+  private chunkCache!: ChunkTileCache;
+  private mapId = "";
   private spawnX = 0;
   private spawnY = 0;
+  // Ambient (procedural) monster spawning config for the active map, plus
+  // the bookkeeping that keeps each chunk from rolling more than once per
+  // room lifetime and keeps the total population bounded.
+  private ambientSpawnChance = 0;
+  private ambientSpawnRules: MapAmbientSpawn[] = [];
+  private rolledAmbientChunks = new Set<string>();
+  private playerLastChunk = new Map<string, string>();
+  private ambientMonsterSeq = 0;
+  private ambientMonsterCount = 0;
+  // Kept alongside each monster's own cached template (on its runtime entry)
+  // so ambient spawns — which don't go through a MonsterSpawn row — have
+  // somewhere to look up a MonsterTemplateWithDrops by id.
+  private monsterTemplatesById = new Map<string, MonsterTemplateWithDrops>();
   private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
   private questsById = new Map<string, QuestFull>();
   private questsByGiverNpc = new Map<string, QuestFull[]>();
@@ -148,6 +229,16 @@ export class WorldRoom extends Room<RoomState> {
   // character rejoins, not to a live session. Loaded once at room creation.
   private itemTemplatesById = new Map<string, ItemTemplate>();
   private equipmentBonus = new Map<string, EquipmentBonusTotals>();
+  // Populated by reloadSpells (keyed by SpellTemplate.id, the cuid a
+  // TalentEffect.spellTemplateId FK points at) — needed to resolve that FK
+  // back to the (classId, keybind) pair SpellId actually keys off, since
+  // getSpellValue is called with a SpellId, not a SpellTemplate row id.
+  private spellTemplatesById = new Map<string, SpellTemplate>();
+  private talentTemplatesById = new Map<string, TalentTemplateFull>();
+  // Per-session: which talents this character has learned and at what rank.
+  // Private per-character data, not schema-synced — see sendTalentState.
+  private learnedTalents = new Map<string, Map<string, number>>();
+  private talentBonus = new Map<string, StatBonusSplit>();
   private unsubscribeContentEvents?: () => void;
 
   async onCreate() {
@@ -158,26 +249,38 @@ export class WorldRoom extends Room<RoomState> {
       throw new Error("No active map found in the database. Run `npx prisma db seed` in packages/server.");
     }
 
-    this.mapGrid = {
-      tileData: JSON.parse(map.tileData) as number[][],
-      tileSize: map.tileSize,
-      cols: map.width,
-      rows: map.height,
-    };
+    this.mapId = map.id;
     this.spawnX = map.spawnX;
     this.spawnY = map.spawnY;
+    this.ambientSpawnChance = map.ambientSpawnChance;
+    this.chunkCache = new ChunkTileCache(map.tileSize, async (minCol, minRow, maxCol, maxRow) => {
+      const rows = await prisma.mapTile.findMany({
+        where: { mapId: map.id, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
+      });
+      return rows.map((r) => ({ col: r.col, row: r.row, tileType: r.tileType, elevation: r.elevation }));
+    });
 
     await this.reloadSpells();
     await this.reloadQuests();
+    await this.reloadTalents();
 
     const itemRows = await prisma.itemTemplate.findMany();
     this.itemTemplatesById = new Map(itemRows.map((item) => [item.id, item]));
+
+    const templateRows = await prisma.monsterTemplate.findMany({ include: { drops: true } });
+    this.monsterTemplatesById = new Map(templateRows.map((t) => [t.id, t]));
+
+    this.ambientSpawnRules = await prisma.mapAmbientSpawn.findMany({ where: { mapId: map.id } });
 
     this.unsubscribeContentEvents = onContentChanged((kind) => {
       if (kind === "spells") void this.reloadSpells();
       else if (kind === "monsters") void this.reloadMonsterTemplates();
       else if (kind === "quests") void this.reloadQuests();
+      else if (kind === "maps") void this.reloadMapContent();
+      else if (kind === "talents") void this.reloadTalents();
     });
+
+    this.clock.setInterval(() => this.preloadChunksAroundPlayers(), CHUNK_PRELOAD_INTERVAL_MS);
 
     const spawnRows = await prisma.monsterSpawn.findMany({
       where: { mapId: map.id },
@@ -206,6 +309,8 @@ export class WorldRoom extends Room<RoomState> {
     this.onMessage("turnInQuest", (client, message: TurnInQuestMessage) => void this.handleTurnInQuest(client, message));
     this.onMessage("equipItem", (client, message: EquipItemMessage) => void this.handleEquipItem(client, message));
     this.onMessage("unequipItem", (client, message: UnequipItemMessage) => void this.handleUnequipItem(client, message));
+    this.onMessage("learnTalent", (client, message: LearnTalentMessage) => void this.handleLearnTalent(client, message));
+    this.onMessage("adminSetLevel", (client, message: AdminSetLevelMessage) => void this.handleAdminSetLevel(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
   }
@@ -248,6 +353,14 @@ export class WorldRoom extends Room<RoomState> {
   private async reloadSpells() {
     const spellRows = await prisma.spellTemplate.findMany();
     this.spellDefsByClass = this.buildSpellDefsByClass(spellRows);
+    this.spellTemplatesById = new Map(spellRows.map((s) => [s.id, s]));
+  }
+
+  // Talent templates are cached at room creation for the same reason spells
+  // are — rebuilding the whole map handles create/update/delete uniformly.
+  private async reloadTalents() {
+    const talentRows = await prisma.talentTemplate.findMany({ include: { effects: true } });
+    this.talentTemplatesById = new Map(talentRows.map((t) => [t.id, t]));
   }
 
   // Monster templates are also cached (on each spawned monster's runtime
@@ -259,6 +372,7 @@ export class WorldRoom extends Room<RoomState> {
   private async reloadMonsterTemplates() {
     const templates = await prisma.monsterTemplate.findMany({ include: { drops: true } });
     const byId = new Map(templates.map((t) => [t.id, t]));
+    this.monsterTemplatesById = byId;
 
     for (const runtime of this.monsterRuntime.values()) {
       const fresh = byId.get(runtime.template.id);
@@ -271,7 +385,100 @@ export class WorldRoom extends Room<RoomState> {
       monster.maxHp = runtime.template.maxHp;
       monster.hp = Math.min(monster.hp, monster.maxHp);
       monster.level = runtime.template.level;
+      monster.attackRange = runtime.template.attackRange;
     }
+  }
+
+  // Terrain (via chunkCache) and ambient-spawn config are both keyed off the
+  // active GameMap row — an admin tile edit or ambient-spawn-rule change
+  // rebuilds both from scratch here. Deliberately does NOT touch
+  // rolledAmbientChunks/ambientMonsterCount: those must survive an unrelated
+  // tile edit, otherwise re-painting one tile would re-roll ambient spawns
+  // across the whole already-explored world and duplicate monsters.
+  private async reloadMapContent() {
+    this.chunkCache.clear();
+    const [map, ambientRows] = await Promise.all([
+      prisma.gameMap.findUnique({ where: { id: this.mapId } }),
+      prisma.mapAmbientSpawn.findMany({ where: { mapId: this.mapId } }),
+    ]);
+    if (map) this.ambientSpawnChance = map.ambientSpawnChance;
+    this.ambientSpawnRules = ambientRows;
+  }
+
+  // Keeps terrain resident in memory a little ahead of where players
+  // actually are, so the "returns Grass synchronously while a chunk is
+  // mid-fetch" fallback in ChunkTileCache is rarely visible in practice.
+  // One warm() call per player (not one per chunk) — see ChunkTileCache.warm.
+  private preloadChunksAroundPlayers() {
+    const tileSize = this.chunkCache.tileSize;
+    for (const player of this.state.players.values()) {
+      const chunkCol = Math.floor(player.x / tileSize / CHUNK_SIZE);
+      const chunkRow = Math.floor(player.y / tileSize / CHUNK_SIZE);
+      const minCol = (chunkCol - CHUNK_PRELOAD_RADIUS) * CHUNK_SIZE;
+      const minRow = (chunkRow - CHUNK_PRELOAD_RADIUS) * CHUNK_SIZE;
+      const maxCol = (chunkCol + CHUNK_PRELOAD_RADIUS + 1) * CHUNK_SIZE - 1;
+      const maxRow = (chunkRow + CHUNK_PRELOAD_RADIUS + 1) * CHUNK_SIZE - 1;
+      void this.chunkCache.warm(minCol, minRow, maxCol, maxRow);
+    }
+  }
+
+  // Rolls ambient (procedural) monster spawns as players cross into chunks
+  // they haven't been in before, this room's lifetime — see the class-level
+  // rolledAmbientChunks/playerLastChunk doc comments for why.
+  private checkAmbientSpawns() {
+    if (this.ambientSpawnRules.length === 0) return;
+    const tileSize = this.chunkCache.tileSize;
+
+    for (const [sessionId, player] of this.state.players) {
+      const col = Math.floor(player.x / tileSize);
+      const row = Math.floor(player.y / tileSize);
+      const key = chunkKeyFor(col, row);
+      if (this.playerLastChunk.get(sessionId) === key) continue;
+      this.playerLastChunk.set(sessionId, key);
+
+      if (this.rolledAmbientChunks.has(key)) continue;
+      this.rolledAmbientChunks.add(key);
+      this.rollAmbientSpawn(key);
+    }
+  }
+
+  private rollAmbientSpawn(chunkKey: string) {
+    if (this.ambientMonsterCount >= MAX_AMBIENT_MONSTERS) return;
+    if (Math.random() >= this.ambientSpawnChance) return;
+
+    const totalWeight = this.ambientSpawnRules.reduce((sum, rule) => sum + rule.weight, 0);
+    if (totalWeight <= 0) return;
+    let roll = Math.random() * totalWeight;
+    let chosen = this.ambientSpawnRules[this.ambientSpawnRules.length - 1];
+    for (const rule of this.ambientSpawnRules) {
+      roll -= rule.weight;
+      if (roll <= 0) {
+        chosen = rule;
+        break;
+      }
+    }
+
+    const template = this.monsterTemplatesById.get(chosen.monsterTemplateId);
+    if (!template) return;
+
+    const { chunkCol, chunkRow } = chunkOriginFromKey(chunkKey);
+    const tileSize = this.chunkCache.tileSize;
+    let spawnCol: number | undefined;
+    let spawnRow: number | undefined;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const col = chunkCol * CHUNK_SIZE + Math.floor(Math.random() * CHUNK_SIZE);
+      const row = chunkRow * CHUNK_SIZE + Math.floor(Math.random() * CHUNK_SIZE);
+      if (isWalkable(this.chunkCache.tileAt(col, row))) {
+        spawnCol = col;
+        spawnRow = row;
+        break;
+      }
+    }
+    if (spawnCol === undefined || spawnRow === undefined) return; // no walkable sample found — skip this chunk
+
+    const id = `ambient-${this.ambientMonsterSeq++}`;
+    this.spawnMonster(id, { x: spawnCol * tileSize + tileSize / 2, y: spawnRow * tileSize + tileSize / 2 }, template);
+    this.ambientMonsterCount++;
   }
 
   // Quests are cached at room creation for performance, same as spells —
@@ -337,6 +544,7 @@ export class WorldRoom extends Room<RoomState> {
     monster.hp = template.maxHp;
     monster.maxHp = template.maxHp;
     monster.level = template.level;
+    monster.attackRange = template.attackRange;
     this.state.monsters.set(id, monster);
 
     this.monsterRuntime.set(id, {
@@ -352,6 +560,22 @@ export class WorldRoom extends Room<RoomState> {
     });
   }
 
+  // null means the cast is allowed to start. "heal" is always self-targeted
+  // so there's no sightline to check; "groundAoe" checks the cast point,
+  // everything else checks the targeted monster.
+  private castRejectionReason(player: Player, spell: SpellDef, message: CastInputMessage): string | null {
+    if (spell.kind === "heal") return null;
+
+    if (spell.kind === "groundAoe") {
+      if (message.x === undefined || message.y === undefined) return "Invalid cast target";
+      return hasLineOfSight(this.chunkCache, player.x, player.y, message.x, message.y) ? null : "No line of sight";
+    }
+
+    const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
+    if (!target) return "Invalid cast target";
+    return hasLineOfSight(this.chunkCache, player.x, player.y, target.x, target.y) ? null : "No line of sight";
+  }
+
   private handleCast(client: Client, message: CastInputMessage) {
     const sessionId = client.sessionId;
     const player = this.state.players.get(sessionId);
@@ -365,7 +589,19 @@ export class WorldRoom extends Room<RoomState> {
 
     const key = `${sessionId}:${message.spellId}`;
     const last = this.lastCastAt.get(key) ?? 0;
-    if (now - last < spell.cooldownMs) return;
+    const cooldownMs = this.getSpellValue(sessionId, player.classId, message.spellId, "cooldownMs", spell.cooldownMs);
+    if (now - last < cooldownMs) return;
+
+    // Checked before the cast is accepted (GCD/cooldown untouched on
+    // rejection) so a blocked shot is refused immediately instead of only
+    // discovered after the full cast-time delay elapses — see
+    // resolveCastEffect/resolveGroundAoe, which re-check at resolution time
+    // in case the target moved/died meanwhile.
+    const rejectionReason = this.castRejectionReason(player, spell, message);
+    if (rejectionReason) {
+      client.send("castFailed", { spellId: message.spellId, reason: rejectionReason } satisfies CastFailedMessage);
+      return;
+    }
 
     // The global cooldown always applies the moment a cast is accepted,
     // regardless of this specific spell's own cooldown/cast-time outcome —
@@ -410,7 +646,8 @@ export class WorldRoom extends Room<RoomState> {
 
     if (spell.kind === "heal") {
       this.lastCastAt.set(cooldownKey, this.clock.currentTime);
-      const healAmount = this.rollForCaster(sessionId, player.className, spell.healAmount ?? 0);
+      const healBase = this.getSpellValue(sessionId, player.classId, message.spellId, "healAmount", spell.healAmount ?? 0);
+      const healAmount = this.rollForCaster(sessionId, player.className, healBase);
       player.hp = Math.min(player.maxHp, player.hp + healAmount);
       this.broadcast("heal", { sessionId } satisfies HealEventMessage);
       return;
@@ -426,7 +663,7 @@ export class WorldRoom extends Room<RoomState> {
     }
 
     const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
-    if (!target || !hasLineOfSight(this.mapGrid, player.x, player.y, target.x, target.y)) {
+    if (!target || !hasLineOfSight(this.chunkCache, player.x, player.y, target.x, target.y)) {
       client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
       return;
     }
@@ -445,6 +682,7 @@ export class WorldRoom extends Room<RoomState> {
     projectile.y = player.y;
     projectile.spellId = message.spellId;
     projectile.classId = player.classId;
+    projectile.casterSessionId = sessionId;
     this.state.projectiles.set(id, projectile);
 
     this.projectileRuntime.set(id, {
@@ -472,29 +710,42 @@ export class WorldRoom extends Room<RoomState> {
     const dx = targetX - player.x;
     const dy = targetY - player.y;
     const dist = Math.hypot(dx, dy);
-    const maxRange = spell.maxRange ?? Infinity;
+    const maxRange = this.getSpellValue(player.sessionId, player.classId, message.spellId, "maxRange", spell.maxRange ?? Infinity);
     if (dist > maxRange && dist > 0) {
       const scale = maxRange / dist;
       targetX = player.x + dx * scale;
       targetY = player.y + dy * scale;
     }
 
-    if (!hasLineOfSight(this.mapGrid, player.x, player.y, targetX, targetY)) return false;
+    if (!hasLineOfSight(this.chunkCache, player.x, player.y, targetX, targetY)) return false;
 
-    const radius = spell.aoeRadius ?? 0;
+    const radius = this.getSpellValue(player.sessionId, player.classId, message.spellId, "aoeRadius", spell.aoeRadius ?? 0);
 
-    for (const [id, monster] of this.state.monsters) {
-      if (Math.hypot(monster.x - targetX, monster.y - targetY) <= radius) {
-        const amount = this.rollForCaster(player.sessionId, player.className, spell.damage ?? 0);
-        this.damageMonster(id, monster, amount, player.sessionId);
+    // A groundAoe spell is configured as either a damage burst or a heal
+    // burst, never both — only the effect this spell actually has an amount
+    // for runs. Without this guard, a heal-only spell (damage left at its
+    // default 0) would still "hit" every monster in radius for 0 and a
+    // damage-only spell would still flash the heal VFX on every ally in
+    // radius for 0, in addition to any spell genuinely configured with a
+    // stray nonzero value in the field it doesn't use.
+    const damageBase = this.getSpellValue(player.sessionId, player.classId, message.spellId, "damage", spell.damage ?? 0);
+    if (damageBase > 0) {
+      for (const [id, monster] of this.state.monsters) {
+        if (Math.hypot(monster.x - targetX, monster.y - targetY) <= radius) {
+          const amount = this.rollForCaster(player.sessionId, player.className, damageBase);
+          this.damageMonster(id, monster, amount, player.sessionId);
+        }
       }
     }
 
-    for (const [sessionId, ally] of this.state.players) {
-      if (Math.hypot(ally.x - targetX, ally.y - targetY) <= radius) {
-        const healAmount = this.rollForCaster(player.sessionId, player.className, spell.healAmount ?? 0);
-        ally.hp = Math.min(ally.maxHp, ally.hp + healAmount);
-        this.broadcast("heal", { sessionId } satisfies HealEventMessage);
+    const healBase = this.getSpellValue(player.sessionId, player.classId, message.spellId, "healAmount", spell.healAmount ?? 0);
+    if (healBase > 0) {
+      for (const [sessionId, ally] of this.state.players) {
+        if (Math.hypot(ally.x - targetX, ally.y - targetY) <= radius) {
+          const healAmount = this.rollForCaster(player.sessionId, player.className, healBase);
+          ally.hp = Math.min(ally.maxHp, ally.hp + healAmount);
+          this.broadcast("heal", { sessionId } satisfies HealEventMessage);
+        }
       }
     }
 
@@ -507,6 +758,7 @@ export class WorldRoom extends Room<RoomState> {
     this.updatePlayers(dt);
     this.updateMonsters(dt);
     this.updateProjectiles(dt);
+    this.checkAmbientSpawns();
   }
 
   private updatePlayers(dt: number) {
@@ -522,7 +774,7 @@ export class WorldRoom extends Room<RoomState> {
       }
 
       const resolved = resolveMovement(
-        this.mapGrid,
+        this.chunkCache,
         player.x,
         player.y,
         input.dx * MOVE_SPEED * dt,
@@ -557,11 +809,22 @@ export class WorldRoom extends Room<RoomState> {
       const speedMultiplier = isSlowed ? runtime.slowMultiplier : 1;
 
       if (target) {
-        if (targetDist > template.attackRange) {
+        // In-range alone isn't enough to land a hit — attackRange is a flat
+        // XY distance, so without also requiring line-of-sight a monster
+        // stuck at the base of a cliff or behind a wall could keep hitting
+        // a player it can't actually reach, the same way a spell cast
+        // through cover shouldn't land (see castRejectionReason). Blocked
+        // means keep chasing instead of idling in place — approaching
+        // (even along this simple straight-line AI, not real pathfinding)
+        // is the only way it might ever get a clear shot.
+        const inRange = targetDist <= template.attackRange;
+        const canSeeTarget = inRange && hasLineOfSight(this.chunkCache, monster.x, monster.y, target.x, target.y);
+
+        if (!canSeeTarget) {
           const dirX = (target.x - monster.x) / targetDist;
           const dirY = (target.y - monster.y) / targetDist;
           const speed = template.chaseSpeed * speedMultiplier;
-          const resolved = resolveMovement(this.mapGrid, monster.x, monster.y, dirX * speed * dt, dirY * speed * dt);
+          const resolved = resolveMovement(this.chunkCache, monster.x, monster.y, dirX * speed * dt, dirY * speed * dt);
           monster.x = resolved.x;
           monster.y = resolved.y;
         } else if (now - runtime.lastAttackAt >= template.attackCooldownMs) {
@@ -585,7 +848,7 @@ export class WorldRoom extends Room<RoomState> {
       if (dist > 4) {
         const speed = template.wanderSpeed * speedMultiplier;
         const resolved = resolveMovement(
-          this.mapGrid,
+          this.chunkCache,
           monster.x,
           monster.y,
           (dx / dist) * speed * dt,
@@ -673,6 +936,34 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
+  // Silently ignored for non-admins (no failure message — this is a debug
+  // command, not a player-facing action). Reuses grantXp/grantExperience
+  // rather than poking `level` directly, so the jump to the target level
+  // still applies the normal per-level stat/HP growth instead of leaving
+  // the character nominally "level 10" with level-1 stats.
+  private async handleAdminSetLevel(client: Client, message: AdminSetLevelMessage) {
+    if (!this.isAdmin.get(client.sessionId)) return;
+
+    const sessionId = client.sessionId;
+    const stats = this.characterStats.get(sessionId);
+    if (!stats) return;
+
+    const targetLevel = Math.max(1, Math.floor(message.level));
+    if (stats.level >= targetLevel) return;
+
+    let neededXp = 0;
+    let level = stats.level;
+    let experience = stats.experience;
+    while (level < targetLevel) {
+      neededXp += xpToNextLevel(level) - experience;
+      experience = 0;
+      level += 1;
+    }
+
+    await this.grantXp(sessionId, neededXp);
+    this.sendTalentState(client);
+  }
+
   // Rolls a monster's loot table independently per entry (so a single kill
   // can drop several things, or nothing) and grants whatever hits straight
   // into the killer's inventory.
@@ -727,39 +1018,58 @@ export class WorldRoom extends Room<RoomState> {
     const base = this.characterStats.get(sessionId);
     if (!base) return undefined;
     const bonus = this.equipmentBonus.get(sessionId) ?? EMPTY_EQUIPMENT_BONUS;
+    const talent = this.talentBonus.get(sessionId) ?? EMPTY_TALENT_BONUS;
     return {
       level: base.level,
       experience: base.experience,
-      armor: base.armor + bonus.armor,
-      strength: base.strength + bonus.strength,
-      intelligence: base.intelligence + bonus.intelligence,
-      dexterity: base.dexterity + bonus.dexterity,
-      criticalChance: base.criticalChance + bonus.criticalChance,
+      armor: applyPercent(base.armor + bonus.armor + talent.flat.armor, talent.percent.armor),
+      strength: applyPercent(base.strength + bonus.strength + talent.flat.strength, talent.percent.strength),
+      intelligence: applyPercent(
+        base.intelligence + bonus.intelligence + talent.flat.intelligence,
+        talent.percent.intelligence,
+      ),
+      dexterity: applyPercent(base.dexterity + bonus.dexterity + talent.flat.dexterity, talent.percent.dexterity),
+      criticalChance: applyPercent(
+        base.criticalChance + bonus.criticalChance + talent.flat.criticalChance,
+        talent.percent.criticalChance,
+      ),
     };
   }
 
   // The one place maxHp/armor/strength/intelligence/dexterity/criticalChance
-  // are derived onto the synced Player fields — called on join, level-up, and
-  // equip/unequip, so those three call sites can never drift out of sync.
-  // maxHp changes are applied as a delta to current hp (same treatment a
-  // level-up's HP gain always got), not a hard reset, so mid-fight HP isn't
-  // clobbered by, say, unequipping a ring.
+  // are derived onto the synced Player fields — called on join, level-up,
+  // equip/unequip, and learn-talent, so those four call sites can never
+  // drift out of sync. maxHp changes are applied as a delta to current hp
+  // (same treatment a level-up's HP gain always got), not a hard reset, so
+  // mid-fight HP isn't clobbered by, say, unequipping a ring.
   private applyStatsToPlayer(sessionId: string) {
     const player = this.state.players.get(sessionId);
     const base = this.characterStats.get(sessionId);
     if (!player || !base) return;
     const bonus = this.equipmentBonus.get(sessionId) ?? EMPTY_EQUIPMENT_BONUS;
+    const talent = this.talentBonus.get(sessionId) ?? EMPTY_TALENT_BONUS;
 
-    const newMaxHp = PLAYER_MAX_HP + (base.level - 1) * HP_PER_LEVEL + bonus.hp;
+    const newMaxHp = applyPercent(
+      PLAYER_MAX_HP + (base.level - 1) * HP_PER_LEVEL + bonus.hp + talent.flat.hp,
+      talent.percent.hp,
+    );
     const delta = newMaxHp - player.maxHp;
     player.maxHp = newMaxHp;
     player.hp = Math.max(0, Math.min(newMaxHp, player.hp + delta));
 
-    player.armor = base.armor + bonus.armor;
-    player.strength = base.strength + bonus.strength;
-    player.intelligence = base.intelligence + bonus.intelligence;
-    player.dexterity = base.dexterity + bonus.dexterity;
-    player.criticalChance = base.criticalChance + bonus.criticalChance;
+    player.armor = applyPercent(base.armor + bonus.armor + talent.flat.armor, talent.percent.armor);
+    player.strength = applyPercent(base.strength + bonus.strength + talent.flat.strength, talent.percent.strength);
+    player.intelligence = applyPercent(
+      base.intelligence + bonus.intelligence + talent.flat.intelligence,
+      talent.percent.intelligence,
+    );
+    player.dexterity = applyPercent(base.dexterity + bonus.dexterity + talent.flat.dexterity, talent.percent.dexterity);
+    player.criticalChance = applyPercent(
+      base.criticalChance + bonus.criticalChance + talent.flat.criticalChance,
+      talent.percent.criticalChance,
+    );
+
+    player.talentPoints = talentPointsForLevel(base.level) - sumTalentRanks(this.learnedTalents.get(sessionId));
   }
 
   private async loadEquipmentBonus(sessionId: string, characterId: string) {
@@ -774,6 +1084,123 @@ export class WorldRoom extends Room<RoomState> {
       bonus.hp += row.item.bonusHp;
     }
     this.equipmentBonus.set(sessionId, bonus);
+  }
+
+  // The talent equivalent of loadEquipmentBonus: loads which talents this
+  // character has learned (and at what rank) into learnedTalents, then sums
+  // every statBonus effect across them into flat/percent totals scaled by
+  // valuePerRank * rank.
+  private async loadTalentBonus(sessionId: string, characterId: string) {
+    const rows = await prisma.characterTalent.findMany({ where: { characterId } });
+    const learned = new Map<string, number>(rows.map((r) => [r.talentId, r.rank]));
+    this.learnedTalents.set(sessionId, learned);
+
+    const flat: EquipmentBonusTotals = { ...EMPTY_EQUIPMENT_BONUS };
+    const percent: EquipmentBonusTotals = { ...EMPTY_EQUIPMENT_BONUS };
+    for (const [talentId, rank] of learned) {
+      const talent = this.talentTemplatesById.get(talentId);
+      if (!talent) continue;
+      for (const effect of talent.effects) {
+        if (effect.effectType !== "statBonus" || !effect.statKey) continue;
+        const amount = (effect.valuePerRank ?? 0) * rank;
+        const target = effect.bonusMode === "percent" ? percent : flat;
+        switch (effect.statKey) {
+          case "armor":
+            target.armor += amount;
+            break;
+          case "strength":
+            target.strength += amount;
+            break;
+          case "intelligence":
+            target.intelligence += amount;
+            break;
+          case "dexterity":
+            target.dexterity += amount;
+            break;
+          case "criticalChance":
+            target.criticalChance += amount;
+            break;
+          case "maxHp":
+            target.hp += amount;
+            break;
+        }
+      }
+    }
+    this.talentBonus.set(sessionId, { flat, percent });
+  }
+
+  // Applies any spellModifier talents this caster has learned for spellId's
+  // "param" to base, flat first then percent. SpellDef objects are
+  // cached/shared across every player of a class (see spellDefsByClass), so
+  // a talent's effect can never be baked into the cached object — it has to
+  // be recomputed from `base` fresh at every read site instead.
+  private getSpellValue(
+    sessionId: string,
+    classId: string,
+    spellId: SpellId,
+    param: TalentSpellParam,
+    base: number,
+  ): number {
+    const learned = this.learnedTalents.get(sessionId);
+    if (!learned || learned.size === 0) return base;
+
+    let flat = 0;
+    let percent = 0;
+    for (const [talentId, rank] of learned) {
+      const talent = this.talentTemplatesById.get(talentId);
+      if (!talent || talent.classId !== classId) continue;
+      for (const effect of talent.effects) {
+        if (effect.effectType !== "spellModifier" || effect.spellParam !== param || !effect.spellTemplateId) continue;
+        const spellTemplate = this.spellTemplatesById.get(effect.spellTemplateId);
+        if (!spellTemplate || spellTemplate.classId !== classId || (spellTemplate.keybind as SpellId) !== spellId) continue;
+        const amount = (effect.valuePerRank ?? 0) * rank;
+        if (effect.bonusMode === "percent") percent += amount;
+        else flat += amount;
+      }
+    }
+    return applyPercent(base + flat, percent);
+  }
+
+  private sendTalentState(client: Client) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    const learned = this.learnedTalents.get(sessionId);
+    const message: TalentStateMessage = {
+      points: player?.talentPoints ?? 0,
+      learned: learned ? [...learned.entries()].map(([talentId, rank]) => ({ talentId, rank })) : [],
+    };
+    client.send("talentState", message);
+  }
+
+  private async handleLearnTalent(client: Client, message: LearnTalentMessage) {
+    const sessionId = client.sessionId;
+    const characterId = this.characterIds.get(sessionId);
+    const player = this.state.players.get(sessionId);
+    if (!characterId || !player) return;
+
+    const talent = this.talentTemplatesById.get(message.talentId);
+    if (!talent || talent.classId !== player.classId) {
+      client.send("talentActionFailed", { reason: "Talent not found." } satisfies TalentActionFailedMessage);
+      return;
+    }
+
+    const learned = this.learnedTalents.get(sessionId) ?? new Map<string, number>();
+    if (!canLearnTalent(talent, learned, player.talentPoints)) {
+      client.send("talentActionFailed", {
+        reason: "That talent isn't available to learn right now.",
+      } satisfies TalentActionFailedMessage);
+      return;
+    }
+
+    await prisma.characterTalent.upsert({
+      where: { characterId_talentId: { characterId, talentId: talent.id } },
+      update: { rank: { increment: 1 } },
+      create: { characterId, talentId: talent.id, rank: 1 },
+    });
+
+    await this.loadTalentBonus(sessionId, characterId);
+    this.applyStatsToPlayer(sessionId);
+    this.sendTalentState(client);
   }
 
   // Inventory/equipment are private per-character data with no need for
@@ -1150,20 +1577,24 @@ export class WorldRoom extends Room<RoomState> {
 
   private resolveSpellHit(
     spell: SpellDef,
+    spellId: SpellId,
     monster: Monster,
     monsterId: string,
     hitX: number,
     hitY: number,
     casterSessionId: string,
   ) {
-    const casterClassName = this.state.players.get(casterSessionId)?.className ?? "";
+    const caster = this.state.players.get(casterSessionId);
+    const casterClassName = caster?.className ?? "";
+    const casterClassId = caster?.classId ?? "";
 
     if (spell.kind === "aoe") {
-      const radius = spell.aoeRadius ?? 0;
+      const radius = this.getSpellValue(casterSessionId, casterClassId, spellId, "aoeRadius", spell.aoeRadius ?? 0);
+      const damageBase = this.getSpellValue(casterSessionId, casterClassId, spellId, "damage", spell.damage ?? 0);
       for (const [id, m] of this.state.monsters) {
         const dist = Math.hypot(m.x - hitX, m.y - hitY);
         if (dist <= radius) {
-          const amount = this.rollForCaster(casterSessionId, casterClassName, spell.damage ?? 0);
+          const amount = this.rollForCaster(casterSessionId, casterClassName, damageBase);
           this.damageMonster(id, m, amount, casterSessionId);
         }
       }
@@ -1178,7 +1609,8 @@ export class WorldRoom extends Room<RoomState> {
       }
     }
 
-    const amount = this.rollForCaster(casterSessionId, casterClassName, spell.damage ?? 0);
+    const damageBase = this.getSpellValue(casterSessionId, casterClassId, spellId, "damage", spell.damage ?? 0);
+    const amount = this.rollForCaster(casterSessionId, casterClassName, damageBase);
     this.damageMonster(monsterId, monster, amount, casterSessionId);
   }
 
@@ -1221,20 +1653,21 @@ export class WorldRoom extends Room<RoomState> {
       const traveled = Math.hypot(projectile.x - runtime.spawnX, projectile.y - runtime.spawnY);
       let hit = false;
 
-      if (!isWalkable(getTileAt(this.mapGrid, projectile.x, projectile.y))) {
+      if (!isWalkable(getTileAt(this.chunkCache, projectile.x, projectile.y))) {
         hit = true;
       } else {
         for (const [monsterId, monster] of this.state.monsters) {
           const dist = Math.hypot(monster.x - projectile.x, monster.y - projectile.y);
           if (dist <= PROJECTILE_HIT_RADIUS + MONSTER_COLLISION_RADIUS) {
-            this.resolveSpellHit(spell, monster, monsterId, projectile.x, projectile.y, runtime.casterSessionId);
+            this.resolveSpellHit(spell, runtime.spellId, monster, monsterId, projectile.x, projectile.y, runtime.casterSessionId);
             hit = true;
             break;
           }
         }
       }
 
-      if (hit || traveled >= (spell.maxRange ?? 0)) {
+      const maxRange = this.getSpellValue(runtime.casterSessionId, runtime.classId, runtime.spellId, "maxRange", spell.maxRange ?? 0);
+      if (hit || traveled >= maxRange) {
         this.state.projectiles.delete(id);
         this.projectileRuntime.delete(id);
       }
@@ -1272,7 +1705,9 @@ export class WorldRoom extends Room<RoomState> {
     };
     this.characterStats.set(client.sessionId, stats);
     this.characterIds.set(client.sessionId, character.id);
+    this.isAdmin.set(client.sessionId, payload.role === "admin");
     await this.loadEquipmentBonus(client.sessionId, character.id);
+    await this.loadTalentBonus(client.sessionId, character.id);
 
     const player = new Player();
     player.sessionId = client.sessionId;
@@ -1291,6 +1726,7 @@ export class WorldRoom extends Room<RoomState> {
     // lives, so join, level-up, and equip/unequip can never disagree.
     this.applyStatsToPlayer(client.sessionId);
     await this.sendInventoryState(client);
+    this.sendTalentState(client);
 
     const characterQuests = await prisma.characterQuest.findMany({ where: { characterId: character.id } });
     const completed = new Set<string>();
@@ -1327,11 +1763,15 @@ export class WorldRoom extends Room<RoomState> {
     this.state.players.delete(client.sessionId);
     this.characterIds.delete(client.sessionId);
     this.characterStats.delete(client.sessionId);
+    this.isAdmin.delete(client.sessionId);
+    this.learnedTalents.delete(client.sessionId);
+    this.talentBonus.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.invulnerableUntil.delete(client.sessionId);
     this.interruptCast(client.sessionId);
     this.gcdUntil.delete(client.sessionId);
     this.completedQuestIds.delete(client.sessionId);
+    this.playerLastChunk.delete(client.sessionId);
     for (let spellId = 1; spellId <= 6; spellId++) {
       this.lastCastAt.delete(`${client.sessionId}:${spellId}`);
     }

@@ -2,22 +2,32 @@ import { Router } from "express";
 import { prisma } from "../db.js";
 import { asyncRoute } from "./errors.js";
 import { requireAdmin } from "./adminAuth.js";
-import type { GameMapDTO, GameMapInput, ActiveMapResponse } from "shared";
-import type { GameMap, MonsterSpawn, NpcSpawn } from "@prisma/client";
+import { notifyContentChanged } from "../contentEvents.js";
+import { TileType } from "shared";
+import type { GameMapDTO, GameMapInput, ActiveMapResponse, MapTileDTO, MapTilesUpdateInput } from "shared";
+import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn } from "@prisma/client";
 
 export const mapsRouter = Router();
 
-function toDTO(map: GameMap & { spawns: MonsterSpawn[]; npcSpawns: NpcSpawn[] }): GameMapDTO {
+// Each ranged tile fetch (used both by the play client's ChunkTileCache and
+// the admin editor's viewport) is capped at this many cells so an
+// oversized/malformed range can't turn into an unbounded query — comfortably
+// above what either caller actually needs at once (client chunk loads are
+// 16x16=256 cells; the admin viewport tops out well under this too).
+const MAX_TILE_RANGE_CELLS = 128 * 128;
+
+function toDTO(
+  map: GameMap & { spawns: MonsterSpawn[]; npcSpawns: NpcSpawn[]; ambientSpawns: MapAmbientSpawn[] },
+): GameMapDTO {
   return {
     id: map.id,
     name: map.name,
-    width: map.width,
-    height: map.height,
     tileSize: map.tileSize,
-    tileData: JSON.parse(map.tileData) as number[][],
     spawnX: map.spawnX,
     spawnY: map.spawnY,
     isActive: map.isActive,
+    ambientSpawnChance: map.ambientSpawnChance,
+    cliffColor: map.cliffColor,
     spawns: map.spawns.map((s) => ({
       id: s.id,
       mapId: s.mapId,
@@ -32,20 +42,28 @@ function toDTO(map: GameMap & { spawns: MonsterSpawn[]; npcSpawns: NpcSpawn[] })
       x: s.x,
       y: s.y,
     })),
+    ambientSpawns: map.ambientSpawns.map((a) => ({
+      id: a.id,
+      monsterTemplateId: a.monsterTemplateId,
+      weight: a.weight,
+    })),
   };
 }
+
+const MAP_INCLUDE = { spawns: true, npcSpawns: true, ambientSpawns: true } as const;
 
 mapsRouter.get(
   "/",
   asyncRoute(async (_req, res) => {
-    const maps = await prisma.gameMap.findMany({ include: { spawns: true, npcSpawns: true }, orderBy: { name: "asc" } });
+    const maps = await prisma.gameMap.findMany({ include: MAP_INCLUDE, orderBy: { name: "asc" } });
     res.json(maps.map(toDTO));
   }),
 );
 
 // Public, read-only: the game server/client's source of truth for "what map
-// is currently live." Kept separate from the general list/detail routes
-// below since this is the one endpoint the game client itself calls.
+// is currently live." The world is infinite, so terrain itself isn't in
+// this response — just enough metadata (mapId/tileSize/spawn point) to
+// bootstrap a ChunkTileCache that fetches tiles on demand.
 mapsRouter.get(
   "/active",
   asyncRoute(async (_req, res) => {
@@ -55,14 +73,71 @@ mapsRouter.get(
       return;
     }
     const response: ActiveMapResponse = {
-      width: map.width,
-      height: map.height,
+      mapId: map.id,
       tileSize: map.tileSize,
-      tileData: JSON.parse(map.tileData) as number[][],
       spawnX: map.spawnX,
       spawnY: map.spawnY,
+      cliffColor: map.cliffColor,
     };
     res.json(response);
+  }),
+);
+
+// Public: returns every explicitly-painted tile within a rectangular
+// tile-space range (inclusive). Gaps are the caller's responsibility to
+// default-fill as Grass — see ChunkTileCache in shared/src/chunkCache.ts,
+// the one client of this endpoint (both the play client and the admin
+// editor use it).
+mapsRouter.get(
+  "/:id/tiles",
+  asyncRoute(async (req, res) => {
+    const mapId = req.params.id as string;
+    const minCol = Number(req.query.minCol);
+    const minRow = Number(req.query.minRow);
+    const maxCol = Number(req.query.maxCol);
+    const maxRow = Number(req.query.maxRow);
+    if (![minCol, minRow, maxCol, maxRow].every(Number.isFinite) || maxCol < minCol || maxRow < minRow) {
+      res.status(400).json({ error: "Invalid range" });
+      return;
+    }
+    const cellCount = (maxCol - minCol + 1) * (maxRow - minRow + 1);
+    if (cellCount > MAX_TILE_RANGE_CELLS) {
+      res.status(400).json({ error: `Range too large (max ${MAX_TILE_RANGE_CELLS} cells)` });
+      return;
+    }
+
+    const tiles = await prisma.mapTile.findMany({
+      where: { mapId, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
+    });
+    res.json(tiles.map((t): MapTileDTO => ({ col: t.col, row: t.row, tileType: t.tileType, elevation: t.elevation })));
+  }),
+);
+
+// Admin-only: paints (or, for entries back at the full default — Grass at
+// elevation 0 — resets to default, deleting the row) a batch of tiles.
+// Batched so an editor Save flushes all dirty cells in one request rather
+// than one write per paint stroke.
+mapsRouter.put(
+  "/:id/tiles",
+  requireAdmin,
+  asyncRoute(async (req, res) => {
+    const mapId = req.params.id as string;
+    const body = req.body as MapTilesUpdateInput;
+
+    await prisma.$transaction(
+      body.tiles.map((tile) =>
+        tile.tileType === TileType.Grass && tile.elevation === 0
+          ? prisma.mapTile.deleteMany({ where: { mapId, col: tile.col, row: tile.row } })
+          : prisma.mapTile.upsert({
+              where: { mapId_col_row: { mapId, col: tile.col, row: tile.row } },
+              update: { tileType: tile.tileType, elevation: tile.elevation },
+              create: { mapId, col: tile.col, row: tile.row, tileType: tile.tileType, elevation: tile.elevation },
+            }),
+      ),
+    );
+
+    notifyContentChanged("maps");
+    res.status(204).end();
   }),
 );
 
@@ -70,7 +145,7 @@ mapsRouter.get(
   "/:id",
   asyncRoute(async (req, res) => {
     const id = req.params.id as string;
-    const map = await prisma.gameMap.findUnique({ where: { id }, include: { spawns: true, npcSpawns: true } });
+    const map = await prisma.gameMap.findUnique({ where: { id }, include: MAP_INCLUDE });
     if (!map) {
       res.status(404).json({ error: "Not found" });
       return;
@@ -87,17 +162,18 @@ mapsRouter.post(
     const map = await prisma.gameMap.create({
       data: {
         name: body.name,
-        width: body.width,
-        height: body.height,
         tileSize: body.tileSize,
-        tileData: JSON.stringify(body.tileData),
         spawnX: body.spawnX,
         spawnY: body.spawnY,
+        ambientSpawnChance: body.ambientSpawnChance,
+        cliffColor: body.cliffColor,
         spawns: { create: body.spawns },
         npcSpawns: { create: body.npcSpawns },
+        ambientSpawns: { create: body.ambientSpawns },
       },
-      include: { spawns: true, npcSpawns: true },
+      include: MAP_INCLUDE,
     });
+    notifyContentChanged("maps");
     res.status(201).json(toDTO(map));
   }),
 );
@@ -112,23 +188,25 @@ mapsRouter.put(
     const map = await prisma.$transaction(async (tx) => {
       await tx.monsterSpawn.deleteMany({ where: { mapId: id } });
       await tx.npcSpawn.deleteMany({ where: { mapId: id } });
+      await tx.mapAmbientSpawn.deleteMany({ where: { mapId: id } });
       return tx.gameMap.update({
         where: { id },
         data: {
           name: body.name,
-          width: body.width,
-          height: body.height,
           tileSize: body.tileSize,
-          tileData: JSON.stringify(body.tileData),
           spawnX: body.spawnX,
           spawnY: body.spawnY,
+          ambientSpawnChance: body.ambientSpawnChance,
+          cliffColor: body.cliffColor,
           spawns: { create: body.spawns },
           npcSpawns: { create: body.npcSpawns },
+          ambientSpawns: { create: body.ambientSpawns },
         },
-        include: { spawns: true, npcSpawns: true },
+        include: MAP_INCLUDE,
       });
     });
 
+    notifyContentChanged("maps");
     res.json(toDTO(map));
   }),
 );
@@ -138,6 +216,7 @@ mapsRouter.delete(
   requireAdmin,
   asyncRoute(async (req, res) => {
     await prisma.gameMap.delete({ where: { id: req.params.id as string } });
+    notifyContentChanged("maps");
     res.status(204).end();
   }),
 );
@@ -151,6 +230,7 @@ mapsRouter.post(
       prisma.gameMap.updateMany({ data: { isActive: false }, where: {} }),
       prisma.gameMap.update({ where: { id }, data: { isActive: true } }),
     ]);
+    notifyContentChanged("maps");
     res.status(204).end();
   }),
 );

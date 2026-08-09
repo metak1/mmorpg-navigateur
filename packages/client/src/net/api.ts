@@ -1,4 +1,13 @@
-import type { ActiveMapResponse, SpellTemplateDTO, ClassTemplateDTO, AccountDTO, AuthResponse, CharacterDTO } from "shared";
+import type {
+  ActiveMapResponse,
+  MapTileDTO,
+  SpellTemplateDTO,
+  ClassTemplateDTO,
+  TalentTemplateDTO,
+  AccountDTO,
+  AuthResponse,
+  CharacterDTO,
+} from "shared";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "ws://localhost:2567";
 const API_BASE_URL = SERVER_URL.replace(/^ws/, "http");
@@ -9,6 +18,25 @@ export async function fetchActiveMap(): Promise<ActiveMapResponse> {
     throw new Error(`Failed to fetch active map: ${response.status}`);
   }
   return response.json() as Promise<ActiveMapResponse>;
+}
+
+// Backs the client-side ChunkTileCache (see WorldScene) — one range per
+// chunk (or per warmed radius), never the whole map, since the world has no
+// fixed size to fetch all of.
+export async function fetchMapTiles(
+  mapId: string,
+  minCol: number,
+  minRow: number,
+  maxCol: number,
+  maxRow: number,
+): Promise<MapTileDTO[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/maps/${mapId}/tiles?minCol=${minCol}&minRow=${minRow}&maxCol=${maxCol}&maxRow=${maxRow}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch map tiles: ${response.status}`);
+  }
+  return response.json() as Promise<MapTileDTO[]>;
 }
 
 export async function fetchSpells(): Promise<SpellTemplateDTO[]> {
@@ -25,6 +53,14 @@ export async function fetchClasses(): Promise<ClassTemplateDTO[]> {
     throw new Error(`Failed to fetch classes: ${response.status}`);
   }
   return response.json() as Promise<ClassTemplateDTO[]>;
+}
+
+export async function fetchTalents(): Promise<TalentTemplateDTO[]> {
+  const response = await fetch(`${API_BASE_URL}/api/talents`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch talents: ${response.status}`);
+  }
+  return response.json() as Promise<TalentTemplateDTO[]>;
 }
 
 async function authRequest(path: string, body: unknown): Promise<AuthResponse> {

@@ -8,10 +8,10 @@ import type {
   RoomState,
   SpellId,
   SpellDef,
-  TileGrid,
   HealEventMessage,
   GroundAoeEventMessage,
   CastFizzledMessage,
+  CastFailedMessage,
   NpcDialogueMessage,
   QuestActionFailedMessage,
   QuestCompletedMessage,
@@ -19,10 +19,28 @@ import type {
   EquipActionFailedMessage,
   LootDroppedMessage,
   CompletedQuestsStateMessage,
+  TalentTemplateDTO,
+  TalentStateMessage,
+  TalentActionFailedMessage,
 } from "shared";
-import { MOVE_SPEED, resolveMovement } from "shared";
+import {
+  MOVE_SPEED,
+  resolveMovement,
+  ChunkTileCache,
+  CHUNK_SIZE,
+  isoProject,
+  isoUnproject,
+  isoUnprojectDirection,
+  isoCircleFootprint,
+  isoElevationOffset,
+  isHiddenByTerrain,
+  hasLineOfSight,
+  TERRAIN_DEPTH,
+  UI_DEPTH,
+  TILE_COLORS,
+} from "shared";
 import { connectToWorld } from "../net/RoomClient.js";
-import { fetchActiveMap, fetchSpells } from "../net/api.js";
+import { fetchActiveMap, fetchMapTiles, fetchSpells, fetchTalents, fetchMe } from "../net/api.js";
 import { Hud } from "../ui/Hud.js";
 import { npcDialogue } from "../ui/NpcDialogue.js";
 import { sidebar } from "../ui/Sidebar.js";
@@ -31,6 +49,10 @@ const REMOTE_SMOOTHING = 0.25; // lerp factor applied per frame toward server po
 const HP_BAR_WIDTH = 30;
 const HP_BAR_HEIGHT = 4;
 const HP_BAR_OFFSET_Y = 20;
+// Opacity applied to an entity's sprite + HP bar while standing behind a
+// cliff tall enough to hide them (see isHiddenByTerrain) — faded rather
+// than fully invisible so the entity doesn't just vanish/pop.
+const OCCLUDED_ALPHA = 0.25;
 const MONSTER_COLOR = 0xff3333;
 const MONSTER_SLOWED_COLOR = 0x5599ff;
 const TARGET_RING_COLOR = 0xffff00;
@@ -45,6 +67,13 @@ const RARITY_TEXT_COLORS: Record<string, string> = {
   epic: "#c060f0",
   legendary: "#ff9d2e",
 };
+// How often the set of loaded terrain chunks is recomputed against the
+// camera's current view — doesn't need to be every frame, chunk boundaries
+// don't move nearly that fast relative to the player's speed.
+const CHUNK_REFRESH_INTERVAL_MS = 250;
+// Extra chunks kept loaded outside the camera's visible rect, so panning
+// doesn't show a pop-in edge right at the viewport boundary.
+const CHUNK_MARGIN = 1;
 
 type Target = { kind: "monster"; id: string } | { kind: "self" };
 
@@ -54,8 +83,18 @@ interface HpBarHolder {
   hpBarFill: Phaser.GameObjects.Rectangle;
 }
 
+// Every mover tracks position in two coordinate systems: worldX/Y (raw
+// simulation-space pixels — predicted locally, or lerped toward targetX/Y
+// for remote entities) and rect.x/y (the projected screen position, the
+// only thing actually handed to Phaser). targetX/Y is the latest raw
+// server-reported position — unchanged in role from before iso, but no
+// longer read directly for rendering or for local prediction (see
+// updateInput: reusing it there caused rubber-banding against continuous
+// server echoes).
 interface PlayerEntity extends HpBarHolder {
   isLocal: boolean;
+  worldX: number;
+  worldY: number;
   targetX: number;
   targetY: number;
   name: string;
@@ -64,16 +103,21 @@ interface PlayerEntity extends HpBarHolder {
 }
 
 interface MonsterEntity extends HpBarHolder {
+  worldX: number;
+  worldY: number;
   targetX: number;
   targetY: number;
   name: string;
   hp: number;
   maxHp: number;
   level: number;
+  attackRange: number;
 }
 
 interface ProjectileEntity {
   shape: Phaser.GameObjects.Rectangle;
+  worldX: number;
+  worldY: number;
   targetX: number;
   targetY: number;
 }
@@ -115,19 +159,46 @@ export class WorldScene extends Phaser.Scene {
   private lastSent = { dx: 0, dy: 0 };
   private token = "";
   private characterId = "";
-  private mapGrid: TileGrid = { tileData: [[0]], tileSize: 32, cols: 1, rows: 1 };
+  private chunkCache!: ChunkTileCache;
+  // Solid fill color for the "riser" face drawn between two adjacent tiles
+  // at different elevation — admin-configured per map (packages/admin/src/mapEditor.ts),
+  // e.g. brown for dirt, gray for stone.
+  private cliffColor = 0x6b4a2f;
+  private chunkLayers = new Map<string, Phaser.GameObjects.Graphics>();
+  // Chunks that were rendered before their real (possibly painted) data had
+  // finished loading — re-checked each refresh tick and re-drawn once the
+  // underlying ChunkTileCache actually has them, so a chunk painted by an
+  // admin doesn't stay visually wrong just because it was the leading edge
+  // of exploration when it was first drawn.
+  private pendingChunkLoads = new Set<string>();
   private spellDefsByClass = new Map<string, Map<SpellId, SpellDef>>();
+  private talentDefsByClass = new Map<string, TalentTemplateDTO[]>();
+  private myClassId = "";
+  // Learned-talent ranks aren't schema-synced (see TalentStateMessage), so
+  // they're cached here from the last push and re-combined with the live
+  // (schema-synced) player.talentPoints on every player.onChange — otherwise
+  // the talents panel would only refresh its point count after the next
+  // learnTalent round-trip instead of the moment a level-up grants one.
+  private talentsLearnedCache: TalentStateMessage["learned"] = [];
   private spellDefs = new Map<SpellId, SpellDef>();
   private target: Target | null = null;
   private targetRing?: Phaser.GameObjects.Rectangle;
+  // Shows the targeted monster's real attackRange footprint — under iso
+  // projection, screen distance isn't proportional to real distance (most
+  // pronounced approaching from directly "above"/"below" on screen), so
+  // eyeballing raw pixel closeness to judge "am I in range" is unreliable.
+  private attackRangeIndicator?: Phaser.GameObjects.Ellipse;
   private targetPanelParts: Phaser.GameObjects.GameObject[] = [];
   private targetNameText?: Phaser.GameObjects.Text;
   private targetHpFill?: Phaser.GameObjects.Rectangle;
   private hud?: Hud;
   private aimingSpell: SpellId | null = null;
-  private groundAoePreviewRing?: Phaser.GameObjects.Arc;
-  private groundAoeRangeRing?: Phaser.GameObjects.Arc;
-  private instructionText?: Phaser.GameObjects.Text;
+  // Ellipses, not Arcs — a world-space circular radius projects to an
+  // ellipse (width 2R, height R) under the non-uniform iso transform, not
+  // a screen-space circle.
+  private groundAoePreviewRing?: Phaser.GameObjects.Ellipse;
+  private groundAoeRangeRing?: Phaser.GameObjects.Ellipse;
+  private castFailedText?: Phaser.GameObjects.Text;
 
   constructor() {
     super("world");
@@ -139,7 +210,8 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.image("tiles", "assets/tiles.png");
+    // No tileset image needed — terrain renders as hand-drawn iso diamonds
+    // (see createChunkLayer) colored via tileColors.ts.
   }
 
   async create() {
@@ -153,14 +225,18 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private async buildWorld() {
-    const [activeMap, spells] = await Promise.all([fetchActiveMap(), fetchSpells()]);
+    const [activeMap, spells, talents, account] = await Promise.all([
+      fetchActiveMap(),
+      fetchSpells(),
+      fetchTalents(),
+      fetchMe(this.token),
+    ]);
+    sidebar.setAdmin(account?.role === "admin");
 
-    this.mapGrid = {
-      tileData: activeMap.tileData,
-      tileSize: activeMap.tileSize,
-      cols: activeMap.width,
-      rows: activeMap.height,
-    };
+    this.chunkCache = new ChunkTileCache(activeMap.tileSize, (minCol, minRow, maxCol, maxRow) =>
+      fetchMapTiles(activeMap.mapId, minCol, minRow, maxCol, maxRow),
+    );
+    this.cliffColor = activeMap.cliffColor;
     for (const spell of spells) {
       let classSpells = this.spellDefsByClass.get(spell.classId);
       if (!classSpells) {
@@ -183,16 +259,21 @@ export class WorldScene extends Phaser.Scene {
         healAmount: spell.healAmount ?? undefined,
       });
     }
+    for (const talent of talents) {
+      const classTalents = this.talentDefsByClass.get(talent.classId) ?? [];
+      classTalents.push(talent);
+      this.talentDefsByClass.set(talent.classId, classTalents);
+    }
 
-    const map = this.make.tilemap({
-      data: this.mapGrid.tileData,
-      tileWidth: this.mapGrid.tileSize,
-      tileHeight: this.mapGrid.tileSize,
+    // No setBounds() — the world has no edges, so the camera follows
+    // unbounded (Phaser supports this fine without a prior setBounds call).
+    // Terrain itself streams in via refreshVisibleChunks below instead of
+    // one static tilemap.
+    this.time.addEvent({
+      delay: CHUNK_REFRESH_INTERVAL_MS,
+      loop: true,
+      callback: () => this.refreshVisibleChunks(),
     });
-    const tileset = map.addTilesetImage("tiles", "tiles", this.mapGrid.tileSize, this.mapGrid.tileSize, 0, 0);
-    if (tileset) map.createLayer(0, tileset, 0, 0);
-
-    this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
 
     this.cursors = this.input.keyboard?.createCursorKeys();
     this.wasd = this.input.keyboard?.addKeys("W,A,S,D") as typeof this.wasd;
@@ -207,8 +288,12 @@ export class WorldScene extends Phaser.Scene {
 
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       if (this.aimingSpell) {
-        if (pointer.leftButtonDown()) this.confirmAiming(pointer.worldX, pointer.worldY);
-        else if (pointer.rightButtonDown()) this.cancelAiming();
+        if (pointer.leftButtonDown()) {
+          // pointer.worldX/Y reflects Phaser's actual (projected) render
+          // space now — unproject before treating it as a raw world point.
+          const raw = isoUnproject(pointer.worldX, pointer.worldY);
+          this.confirmAiming(raw.x, raw.y);
+        } else if (pointer.rightButtonDown()) this.cancelAiming();
         return;
       }
       if (!pointer.leftButtonDown()) return;
@@ -219,27 +304,16 @@ export class WorldScene extends Phaser.Scene {
       this.setTarget(null);
     });
 
-    this.instructionText = this.add
-      .text(
-        8,
-        8,
-        `Arrows / WASD: move    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
-        {
-          fontSize: "14px",
-          color: "#ffffff",
-          backgroundColor: "#000000aa",
-          padding: { x: 6, y: 4 },
-        },
-      )
-      .setScrollFactor(0)
-      .setDepth(1000);
-
     const { room, $ } = await connectToWorld(this.token, this.characterId);
     this.room = room;
 
     room.onMessage("heal", (msg: HealEventMessage) => this.playHealEffect(msg.sessionId));
     room.onMessage("groundAoe", (msg: GroundAoeEventMessage) => this.playGroundAoeEffect(msg));
     room.onMessage("castFizzled", (msg: CastFizzledMessage) => this.hud?.cancelCast(msg.spellId));
+    room.onMessage("castFailed", (msg: CastFailedMessage) => {
+      this.hud?.rejectCast(msg.spellId);
+      this.showCastFailedMessage(msg.reason);
+    });
     room.onMessage("npcDialogue", (msg: NpcDialogueMessage) => {
       npcDialogue.show(msg, {
         onAccept: (questId) => room.send("acceptQuest", { questId }),
@@ -260,6 +334,17 @@ export class WorldScene extends Phaser.Scene {
       onEquip: (itemId, slot) => room.send("equipItem", { itemId, slot }),
       onUnequip: (slot) => room.send("unequipItem", { slot }),
     });
+    room.onMessage("talentState", (msg: TalentStateMessage) => {
+      this.talentsLearnedCache = msg.learned;
+      sidebar.setTalents({ points: msg.points, learned: msg.learned, defs: this.talentDefsByClass.get(this.myClassId) ?? [] });
+    });
+    room.onMessage("talentActionFailed", (msg: TalentActionFailedMessage) => alert(msg.reason));
+    sidebar.setTalentHandlers({
+      onLearn: (talentId) => room.send("learnTalent", { talentId }),
+    });
+    sidebar.setAdminHandlers({
+      onLevelTo10: () => room.send("adminSetLevel", { level: 10 }),
+    });
 
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {
       const spellId = SPELL_KEY_CODES[event.code];
@@ -269,13 +354,16 @@ export class WorldScene extends Phaser.Scene {
     $(room.state).players.onAdd((player: Player, sessionId: string) => {
       const isLocal = sessionId === room.sessionId;
       const color = isLocal ? 0x00ff88 : 0xff8800;
-      const rect = this.add.rectangle(player.x, player.y, 24, 24, color);
-      const { hpBarBg, hpBarFill } = this.createHpBar(player.x, player.y);
+      const p = this.projectEntity(player.x, player.y);
+      const rect = this.add.rectangle(p.x, p.y, 24, 24, color).setDepth(p.depth);
+      const { hpBarBg, hpBarFill } = this.createHpBar(p.x, p.y);
       const entity: PlayerEntity = {
         rect,
         hpBarBg,
         hpBarFill,
         isLocal,
+        worldX: player.x,
+        worldY: player.y,
         targetX: player.x,
         targetY: player.y,
         name: player.name,
@@ -283,15 +371,21 @@ export class WorldScene extends Phaser.Scene {
         maxHp: player.maxHp,
       };
       this.entities.set(sessionId, entity);
+      this.positionHpBar(entity);
 
       if (isLocal) {
-        this.cameras.main.startFollow(rect, true);
+        // lerpX/Y eases the camera toward the player instead of snapping to
+        // their exact position every frame — the player's own rect already
+        // moves in discrete per-tick steps (local prediction), so without
+        // this the camera inherited that same steppy motion.
+        this.cameras.main.startFollow(rect, true, 0.1, 0.1);
         rect.setInteractive({ useHandCursor: true });
         rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
           if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
           if (pointer.leftButtonDown()) this.setTarget({ kind: "self" });
         });
-        this.setupSpellbarForClass(player.classId, player.className);
+        this.myClassId = player.classId;
+        this.setupSpellbarForClass(player.classId);
         this.hud?.setHealth(player.hp, player.maxHp);
         this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
         this.syncCharacterStats(player);
@@ -328,6 +422,11 @@ export class WorldScene extends Phaser.Scene {
           this.hud?.setHealth(player.hp, player.maxHp);
           this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
           this.syncCharacterStats(player);
+          sidebar.setTalents({
+            points: player.talentPoints,
+            learned: this.talentsLearnedCache,
+            defs: this.talentDefsByClass.get(this.myClassId) ?? [],
+          });
         }
       });
     });
@@ -341,31 +440,37 @@ export class WorldScene extends Phaser.Scene {
     });
 
     $(room.state).monsters.onAdd((monster: Monster, id: string) => {
-      const rect = this.add.rectangle(monster.x, monster.y, 28, 28, MONSTER_COLOR);
+      const p = this.projectEntity(monster.x, monster.y);
+      const rect = this.add.rectangle(p.x, p.y, 28, 28, MONSTER_COLOR).setDepth(p.depth);
       rect.setInteractive({ useHandCursor: true });
       rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
         if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
         if (pointer.leftButtonDown()) this.setTarget({ kind: "monster", id });
       });
-      const { hpBarBg, hpBarFill } = this.createHpBar(monster.x, monster.y);
+      const { hpBarBg, hpBarFill } = this.createHpBar(p.x, p.y);
       const entity: MonsterEntity = {
         rect,
         hpBarBg,
         hpBarFill,
+        worldX: monster.x,
+        worldY: monster.y,
         targetX: monster.x,
         targetY: monster.y,
         name: monster.name,
         hp: monster.hp,
         maxHp: monster.maxHp,
         level: monster.level,
+        attackRange: monster.attackRange,
       };
       this.monsters.set(id, entity);
+      this.positionHpBar(entity);
 
       let lastHp = monster.hp;
       $(monster).onChange(() => {
         entity.targetX = monster.x;
         entity.targetY = monster.y;
         entity.hp = monster.hp;
+        entity.attackRange = monster.attackRange;
         hpBarFill.width = HP_BAR_WIDTH * Math.max(0, monster.hp / entity.maxHp);
         rect.setFillStyle(monster.slowed ? MONSTER_SLOWED_COLOR : MONSTER_COLOR);
 
@@ -386,20 +491,24 @@ export class WorldScene extends Phaser.Scene {
     });
 
     $(room.state).npcs.onAdd((npc: Npc, id: string) => {
-      const rect = this.add.rectangle(npc.x, npc.y, 26, 26, npc.color);
+      const p = this.projectEntity(npc.x, npc.y);
+      const rect = this.add.rectangle(p.x, p.y, 26, 26, npc.color).setDepth(p.depth);
       rect.setInteractive({ useHandCursor: true });
       rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
         if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
         if (pointer.leftButtonDown()) this.room?.send("talk", { npcId: id });
       });
+      // -22 is a screen-space "above the head" offset, so it's applied to
+      // the rendered (elevation-shifted) position, not raw world coordinates.
       const nameText = this.add
-        .text(npc.x, npc.y - 22, npc.name, {
+        .text(p.x, p.y - 22, npc.name, {
           fontSize: "11px",
           color: "#ffffff",
           backgroundColor: "#000000aa",
           padding: { x: 3, y: 1 },
         })
-        .setOrigin(0.5);
+        .setOrigin(0.5)
+        .setDepth(p.depth + 1);
       this.npcs.set(id, { rect, nameText });
     });
 
@@ -414,8 +523,28 @@ export class WorldScene extends Phaser.Scene {
       const spell = this.spellDefsByClass.get(projectile.classId)?.get(projectile.spellId as SpellId);
       const size = spell?.size ?? 6;
       const color = spell?.color ?? 0xffffff;
-      const shape = this.add.rectangle(projectile.x, projectile.y, size, size, color);
-      const entity: ProjectileEntity = { shape, targetX: projectile.x, targetY: projectile.y };
+
+      // projectile.x/y is the caster's server-authoritative position at cast
+      // time — it can already be a bit behind wherever the caster's own
+      // sprite has since rendered to (local prediction keeps moving after
+      // the cast is sent; a remote caster's sprite is smoothed toward its
+      // own target separately). Spawning from the caster entity's current
+      // worldX/Y instead makes the projectile visibly leave their body
+      // rather than appearing offset from it; it still lerps toward the
+      // server's real projectile position from there via targetX/Y below.
+      const caster = this.entities.get(projectile.casterSessionId);
+      const spawnWorldX = caster?.worldX ?? projectile.x;
+      const spawnWorldY = caster?.worldY ?? projectile.y;
+
+      const p = this.projectEntity(spawnWorldX, spawnWorldY);
+      const shape = this.add.rectangle(p.x, p.y, size, size, color).setDepth(p.depth);
+      const entity: ProjectileEntity = {
+        shape,
+        worldX: spawnWorldX,
+        worldY: spawnWorldY,
+        targetX: projectile.x,
+        targetY: projectile.y,
+      };
       this.projectiles.set(id, entity);
 
       $(projectile).onChange(() => {
@@ -430,10 +559,199 @@ export class WorldScene extends Phaser.Scene {
     });
   }
 
+  // Streams terrain in as small per-chunk tilemaps instead of one static
+  // map — creates whatever chunks are newly visible (camera rect + a
+  // margin), destroys ones that scrolled out, and re-draws any chunk that
+  // was first rendered before its real data had finished loading (see
+  // pendingChunkLoads).
+  private refreshVisibleChunks() {
+    const tileSize = this.chunkCache.tileSize;
+    const chunkPx = CHUNK_SIZE * tileSize;
+    const view = this.cameras.main.worldView;
+
+    // view is in projected (screen) space; a screen-aligned rect unprojects
+    // to a rotated quadrilateral in world space, not another axis-aligned
+    // rect, so take the bounding box across all 4 unprojected corners
+    // rather than unprojecting the rect's two extremes directly.
+    const corners = [
+      isoUnproject(view.x, view.y),
+      isoUnproject(view.x + view.width, view.y),
+      isoUnproject(view.x, view.y + view.height),
+      isoUnproject(view.x + view.width, view.y + view.height),
+    ];
+    const minWorldX = Math.min(...corners.map((c) => c.x));
+    const maxWorldX = Math.max(...corners.map((c) => c.x));
+    const minWorldY = Math.min(...corners.map((c) => c.y));
+    const maxWorldY = Math.max(...corners.map((c) => c.y));
+
+    const minChunkCol = Math.floor(minWorldX / chunkPx) - CHUNK_MARGIN;
+    const minChunkRow = Math.floor(minWorldY / chunkPx) - CHUNK_MARGIN;
+    const maxChunkCol = Math.floor(maxWorldX / chunkPx) + CHUNK_MARGIN;
+    const maxChunkRow = Math.floor(maxWorldY / chunkPx) + CHUNK_MARGIN;
+
+    const visibleKeys = new Set<string>();
+    for (let chunkCol = minChunkCol; chunkCol <= maxChunkCol; chunkCol++) {
+      for (let chunkRow = minChunkRow; chunkRow <= maxChunkRow; chunkRow++) {
+        const key = `${chunkCol},${chunkRow}`;
+        visibleKeys.add(key);
+        if (!this.chunkLayers.has(key)) this.createChunkLayer(key, chunkCol, chunkRow);
+      }
+    }
+
+    for (const [key, layer] of this.chunkLayers) {
+      if (visibleKeys.has(key)) continue;
+      layer.destroy();
+      this.chunkLayers.delete(key);
+      this.pendingChunkLoads.delete(key);
+    }
+
+    for (const key of [...this.pendingChunkLoads]) {
+      const [chunkCol, chunkRow] = key.split(",").map(Number);
+      if (!this.chunkCache.isChunkLoaded(chunkCol * CHUNK_SIZE, chunkRow * CHUNK_SIZE)) continue;
+      this.chunkLayers.get(key)?.destroy();
+      this.chunkLayers.delete(key);
+      this.pendingChunkLoads.delete(key);
+      this.createChunkLayer(key, chunkCol, chunkRow);
+    }
+  }
+
+  // Draws a chunk as CHUNK_SIZE×CHUNK_SIZE hand-filled iso diamonds (one
+  // per tile) instead of a Phaser Tilemap — projecting each tile's 4 raw
+  // world-space corners is what actually produces the diamond shape.
+  private createChunkLayer(key: string, chunkCol: number, chunkRow: number) {
+    const tileSize = this.chunkCache.tileSize;
+    const graphics = this.add.graphics();
+    // TERRAIN_DEPTH is a fixed floor far below any world-tier entity depth
+    // (which is unbounded — this world has no edges), so chunks always
+    // render behind everything regardless of creation order or how far a
+    // player has traveled from spawn.
+    graphics.setDepth(TERRAIN_DEPTH);
+
+    // Nudges each corner outward from the tile's center by a hair, so
+    // adjacent diamonds' fills overlap slightly instead of leaving sub-pixel
+    // seams — a common vector-fill artifact, more visible here since these
+    // are flat placeholder colors with no border art to hide it.
+    const SEAM_PAD = 1;
+
+    // Flat tiles never overlap on screen, so draw order didn't matter
+    // before elevation existed. An elevated tile's diamond IS shifted up
+    // into neighboring tiles' screen space, so cells must be painted in
+    // painter's-algorithm order (farthest from camera first) or a raised
+    // tile can get incorrectly painted over by whatever's "behind" it in
+    // raw iteration order. Depth for a 2:1 projection is proportional to
+    // col+row, so sort ascending by that instead of raw row-major order.
+    const cells: Array<{ r: number; c: number }> = [];
+    for (let r = 0; r < CHUNK_SIZE; r++) {
+      for (let c = 0; c < CHUNK_SIZE; c++) cells.push({ r, c });
+    }
+    cells.sort((a, b) => a.r + a.c - (b.r + b.c));
+
+    // Fills the vertical gap between two adjacent tiles at different
+    // elevations with a solid color — a simplified "riser" wall face, not
+    // true 3D geometry. (worldX1,worldY1)-(worldX2,worldY2) is their shared
+    // edge in raw world space; topElevation belongs to the higher (current)
+    // tile, bottomElevation to the lower neighbor.
+    const drawCliffFace = (
+      worldX1: number,
+      worldY1: number,
+      worldX2: number,
+      worldY2: number,
+      topElevation: number,
+      bottomElevation: number,
+    ) => {
+      const topShift = isoElevationOffset(topElevation, tileSize);
+      const bottomShift = isoElevationOffset(bottomElevation, tileSize);
+      const p1 = isoProject(worldX1, worldY1);
+      const p2 = isoProject(worldX2, worldY2);
+      graphics.fillStyle(this.cliffColor, 1);
+      graphics.fillPoints(
+        [
+          { x: p1.x, y: p1.y - topShift },
+          { x: p2.x, y: p2.y - topShift },
+          { x: p2.x, y: p2.y - bottomShift },
+          { x: p1.x, y: p1.y - bottomShift },
+        ],
+        true,
+      );
+    };
+
+    for (const { r, c } of cells) {
+      const col = chunkCol * CHUNK_SIZE + c;
+      const row = chunkRow * CHUNK_SIZE + r;
+      const elevation = this.chunkCache.elevationAt(col, row);
+      const color = TILE_COLORS[this.chunkCache.tileAt(col, row)] ?? 0x000000;
+      const elevationShift = isoElevationOffset(elevation, tileSize);
+
+      const worldLeft = col * tileSize;
+      const worldTop = row * tileSize;
+      const corners = [
+        isoProject(worldLeft, worldTop),
+        isoProject(worldLeft + tileSize, worldTop),
+        isoProject(worldLeft + tileSize, worldTop + tileSize),
+        isoProject(worldLeft, worldTop + tileSize),
+      ].map((p) => ({ x: p.x, y: p.y - elevationShift }));
+
+      const centerX = (corners[0].x + corners[2].x) / 2;
+      const centerY = (corners[0].y + corners[2].y) / 2;
+      const padded = corners.map((p) => {
+        const dx = p.x - centerX;
+        const dy = p.y - centerY;
+        const len = Math.hypot(dx, dy) || 1;
+        return { x: p.x + (dx / len) * SEAM_PAD, y: p.y + (dy / len) * SEAM_PAD };
+      });
+
+      graphics.fillStyle(color, 1);
+      graphics.fillPoints(padded, true);
+
+      // Cliff faces on the two screen-front-facing edges (east + south —
+      // the ones meeting at this diamond's frontmost/bottom corner) —
+      // drawn wherever this tile sits higher than that neighbor, regardless
+      // of how big the gap is (only *movement* is limited to a 1-level
+      // step, terrain generation/painting isn't).
+      const northElevation = this.chunkCache.elevationAt(col, row - 1);
+      const eastElevation = this.chunkCache.elevationAt(col + 1, row);
+      const southElevation = this.chunkCache.elevationAt(col, row + 1);
+      const westElevation = this.chunkCache.elevationAt(col - 1, row);
+      if (elevation > eastElevation) {
+        drawCliffFace(worldLeft + tileSize, worldTop, worldLeft + tileSize, worldTop + tileSize, elevation, eastElevation);
+      }
+      if (elevation > southElevation) {
+        drawCliffFace(worldLeft, worldTop + tileSize, worldLeft + tileSize, worldTop + tileSize, elevation, southElevation);
+      }
+
+      // A thin line along whichever top edges border a differently-elevated
+      // neighbor, on ALL FOUR sides — south/east already get a full cliff
+      // wall above, but north/west (this projection's "back" edges, where a
+      // full wall would look wrong/inside-out) still need *some* boundary
+      // marker, or two same-colored tiles at different heights are
+      // otherwise indistinguishable there.
+      graphics.lineStyle(1, 0x000000, 0.35);
+      const topEdges: Array<[{ x: number; y: number }, { x: number; y: number }, number]> = [
+        [corners[0], corners[1], northElevation],
+        [corners[1], corners[2], eastElevation],
+        [corners[2], corners[3], southElevation],
+        [corners[3], corners[0], westElevation],
+      ];
+      for (const [from, to, neighborElevation] of topEdges) {
+        if (neighborElevation === elevation) continue;
+        graphics.beginPath();
+        graphics.moveTo(from.x, from.y);
+        graphics.lineTo(to.x, to.y);
+        graphics.strokePath();
+      }
+    }
+
+    this.chunkLayers.set(key, graphics);
+
+    if (!this.chunkCache.isChunkLoaded(chunkCol * CHUNK_SIZE, chunkRow * CHUNK_SIZE)) {
+      this.pendingChunkLoads.add(key);
+    }
+  }
+
   // Called once, when the local player's own class is known (their spell set
   // and its size aren't known until then) — builds the hotbar/HUD sized to
   // that class's kit instead of a fixed universal slot count.
-  private setupSpellbarForClass(classId: string, className: string) {
+  private setupSpellbarForClass(classId: string) {
     const classSpells = this.spellDefsByClass.get(classId) ?? new Map<SpellId, SpellDef>();
     this.spellDefs = classSpells;
 
@@ -445,11 +763,6 @@ export class WorldScene extends Phaser.Scene {
       (spellId) => this.handleSpellActivated(spellId),
     );
     this.hud.setSpellDefs(this.spellDefs);
-
-    const spellList = spellIds.map((spellId) => `${spellId} ${classSpells.get(spellId)?.name ?? "?"}`).join("   ");
-    this.instructionText?.setText(
-      `${className}    ${spellList}    (left-click a monster or yourself to target, Esc to clear, ground AOE casts at your cursor)`,
-    );
   }
 
   private syncCharacterStats(player: Player) {
@@ -468,6 +781,20 @@ export class WorldScene extends Phaser.Scene {
     });
   }
 
+  // Projects a raw world position to a rendered screen position (shifted
+  // up/down by the occupied tile's elevation) plus a depth key for
+  // draw-order. depth is deliberately UNSHIFTED (true world position only)
+  // — elevation is a pure visual offset, it never lets something merely
+  // tall draw in front of something genuinely closer to the camera.
+  private projectEntity(worldX: number, worldY: number): { x: number; y: number; depth: number } {
+    const tileSize = this.chunkCache.tileSize;
+    const col = Math.floor(worldX / tileSize);
+    const row = Math.floor(worldY / tileSize);
+    const elevation = this.chunkCache.elevationAt(col, row);
+    const proj = isoProject(worldX, worldY);
+    return { x: proj.x, y: proj.y - isoElevationOffset(elevation, tileSize), depth: proj.y };
+  }
+
   private createHpBar(x: number, y: number) {
     const barY = y - HP_BAR_OFFSET_Y;
     const hpBarBg = this.add.rectangle(x, barY, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
@@ -477,8 +804,18 @@ export class WorldScene extends Phaser.Scene {
 
   private positionHpBar(entity: HpBarHolder) {
     const barY = entity.rect.y - HP_BAR_OFFSET_Y;
-    entity.hpBarBg.setPosition(entity.rect.x, barY);
-    entity.hpBarFill.setPosition(entity.rect.x - HP_BAR_WIDTH / 2, barY);
+    entity.hpBarBg.setPosition(entity.rect.x, barY).setDepth(entity.rect.depth + 1);
+    entity.hpBarFill.setPosition(entity.rect.x - HP_BAR_WIDTH / 2, barY).setDepth(entity.rect.depth + 2);
+  }
+
+  // Fades an entity (and its HP bar) while a cliff tall enough to hide them
+  // stands between their current tile and the camera — purely a rendering
+  // effect, see isHiddenByTerrain in shared/src/map.ts.
+  private applyOcclusion(entity: HpBarHolder, worldX: number, worldY: number) {
+    const alpha = isHiddenByTerrain(this.chunkCache, worldX, worldY) ? OCCLUDED_ALPHA : 1;
+    entity.rect.setAlpha(alpha);
+    entity.hpBarBg.setAlpha(alpha);
+    entity.hpBarFill.setAlpha(alpha);
   }
 
   // Ground-targeted spells are a two-step cast: activating the spell (hotkey
@@ -504,16 +841,25 @@ export class WorldScene extends Phaser.Scene {
     this.aimingSpell = spellId;
     const radius = spell.aoeRadius ?? 0;
     const maxRange = spell.maxRange ?? 0;
+    const previewSize = isoCircleFootprint(radius);
+    const rangeSize = isoCircleFootprint(maxRange);
 
+    // Aiming aids always render on top (UI tier), same as their original
+    // fixed-above-everything depth before iso — they're not meant to be
+    // occludable by world entities.
     if (!this.groundAoePreviewRing) {
-      this.groundAoePreviewRing = this.add.circle(0, 0, radius).setDepth(200);
+      this.groundAoePreviewRing = this.add.ellipse(0, 0, previewSize.width, previewSize.height).setDepth(UI_DEPTH);
     }
-    this.groundAoePreviewRing.setRadius(radius).setStrokeStyle(1, spell.color, 0.6).setFillStyle(spell.color, 0.12).setVisible(true);
+    this.groundAoePreviewRing
+      .setSize(previewSize.width, previewSize.height)
+      .setStrokeStyle(1, spell.color, 0.6)
+      .setFillStyle(spell.color, 0.12)
+      .setVisible(true);
 
     if (!this.groundAoeRangeRing) {
-      this.groundAoeRangeRing = this.add.circle(0, 0, maxRange).setDepth(199);
+      this.groundAoeRangeRing = this.add.ellipse(0, 0, rangeSize.width, rangeSize.height).setDepth(UI_DEPTH);
     }
-    this.groundAoeRangeRing.setRadius(maxRange).setStrokeStyle(1, spell.color, 0.25).setVisible(true);
+    this.groundAoeRangeRing.setSize(rangeSize.width, rangeSize.height).setStrokeStyle(1, spell.color, 0.25).setVisible(true);
   }
 
   private cancelAiming() {
@@ -530,13 +876,30 @@ export class WorldScene extends Phaser.Scene {
     this.cancelAiming();
     if (!spell || !this.hud.canCast(spellId, this.time.now)) return;
 
+    const local = this.entities.get(this.room.sessionId);
+    if (local && !hasLineOfSight(this.chunkCache, local.worldX, local.worldY, worldX, worldY)) {
+      this.showCastFailedMessage("No line of sight");
+      return;
+    }
+
     this.hud.beginCast(spellId, spell.name, this.time.now);
     this.room.send("cast", { spellId, x: worldX, y: worldY });
   }
 
   private playGroundAoeEffect(msg: GroundAoeEventMessage) {
-    const fill = this.add.circle(msg.x, msg.y, msg.radius, msg.color, 0.25).setDepth(300);
-    const outline = this.add.circle(msg.x, msg.y, msg.radius).setStrokeStyle(2, msg.color, 0.9).setDepth(301);
+    // msg.x/y are raw world coordinates from the server — project once
+    // (including the target tile's elevation, so the burst sits at the
+    // right height), and use an ellipse (not a circle) for the same reason
+    // the aiming rings do: a world-space radius isn't a screen-space radius
+    // here.
+    const p = this.projectEntity(msg.x, msg.y);
+    const depth = p.depth + 10; // just above whatever's standing at that spot
+    const size = isoCircleFootprint(msg.radius);
+    const fill = this.add.ellipse(p.x, p.y, size.width, size.height, msg.color, 0.25).setDepth(depth);
+    const outline = this.add
+      .ellipse(p.x, p.y, size.width, size.height)
+      .setStrokeStyle(2, msg.color, 0.9)
+      .setDepth(depth + 1);
     this.tweens.add({
       targets: [fill, outline],
       alpha: 0,
@@ -554,7 +917,7 @@ export class WorldScene extends Phaser.Scene {
     const ring = this.add
       .rectangle(entity.rect.x, entity.rect.y, 24, 24)
       .setStrokeStyle(2, 0x55ff88)
-      .setDepth(400);
+      .setDepth(entity.rect.depth + 10);
     this.tweens.add({
       targets: ring,
       scale: 2.2,
@@ -579,7 +942,7 @@ export class WorldScene extends Phaser.Scene {
           color: RARITY_TEXT_COLORS[drop.rarity] ?? "#ffffff",
         })
         .setOrigin(0.5, 1)
-        .setDepth(500);
+        .setDepth(local.rect.depth + 10);
       this.tweens.add({
         targets: text,
         y: text.y - 24,
@@ -610,7 +973,7 @@ export class WorldScene extends Phaser.Scene {
 
     this.targetPanelParts = [bg, nameText, hpBarBg, hpBarFill, hint];
     for (const part of this.targetPanelParts) {
-      (part as Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text).setScrollFactor(0).setDepth(1000);
+      (part as Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text).setScrollFactor(0).setDepth(UI_DEPTH);
     }
     this.targetNameText = nameText;
     this.targetHpFill = hpBarFill;
@@ -654,6 +1017,28 @@ export class WorldScene extends Phaser.Scene {
     if (this.targetHpFill) this.targetHpFill.width = TARGET_PANEL_HP_WIDTH * Math.max(0, hp / maxHp);
   }
 
+  // Reuses one text object (reset/re-tweened on each call) rather than
+  // spawning a new one per attempt, since a blocked cast is something a
+  // player is likely to retry rapidly (e.g. mashing the hotkey behind cover).
+  private showCastFailedMessage(reason: string) {
+    const cam = this.cameras.main;
+    if (!this.castFailedText) {
+      this.castFailedText = this.add
+        .text(0, 0, "", {
+          fontSize: "16px",
+          color: "#ff5555",
+          backgroundColor: "#000000aa",
+          padding: { x: 8, y: 4 },
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(UI_DEPTH);
+    }
+    this.tweens.killTweensOf(this.castFailedText);
+    this.castFailedText.setText(reason).setPosition(cam.width / 2, cam.height / 2 - 80).setAlpha(1);
+    this.tweens.add({ targets: this.castFailedText, alpha: 0, duration: 800, delay: 500 });
+  }
+
   private castSpell(spellId: SpellId) {
     if (!this.room || !this.hud) return;
     const spell = this.spellDefs.get(spellId);
@@ -669,6 +1054,12 @@ export class WorldScene extends Phaser.Scene {
     }
 
     if (!this.target || this.target.kind !== "monster") return;
+    const local = this.entities.get(this.room.sessionId);
+    const monster = this.monsters.get(this.target.id);
+    if (local && monster && !hasLineOfSight(this.chunkCache, local.worldX, local.worldY, monster.worldX, monster.worldY)) {
+      this.showCastFailedMessage("No line of sight");
+      return;
+    }
     this.hud.beginCast(spellId, spell.name, now);
     this.room.send("cast", { spellId, targetId: this.target.id });
   }
@@ -683,77 +1074,122 @@ export class WorldScene extends Phaser.Scene {
   private updateInput(dt: number) {
     if (!this.room || !this.cursors) return;
 
-    let dx = 0;
-    let dy = 0;
-    if (this.cursors.left.isDown || this.wasd?.A.isDown) dx = -1;
-    else if (this.cursors.right.isDown || this.wasd?.D.isDown) dx = 1;
-    if (this.cursors.up.isDown || this.wasd?.W.isDown) dy = -1;
-    else if (this.cursors.down.isDown || this.wasd?.S.isDown) dy = 1;
+    let screenDx = 0;
+    let screenDy = 0;
+    if (this.cursors.left.isDown || this.wasd?.A.isDown) screenDx = -1;
+    else if (this.cursors.right.isDown || this.wasd?.D.isDown) screenDx = 1;
+    if (this.cursors.up.isDown || this.wasd?.W.isDown) screenDy = -1;
+    else if (this.cursors.down.isDown || this.wasd?.S.isDown) screenDy = 1;
 
-    if (dx === -1) this.lastDirection = "left";
-    else if (dx === 1) this.lastDirection = "right";
-    else if (dy === -1) this.lastDirection = "up";
-    else if (dy === 1) this.lastDirection = "down";
+    if (screenDx === -1) this.lastDirection = "left";
+    else if (screenDx === 1) this.lastDirection = "right";
+    else if (screenDy === -1) this.lastDirection = "up";
+    else if (screenDy === 1) this.lastDirection = "down";
 
     // Moving cancels a channeled cast rather than being blocked outright —
     // mirrors the server, which interrupts the cast the moment movement
     // input arrives instead of rooting the player in place.
-    if (dx !== 0 || dy !== 0) {
+    if (screenDx !== 0 || screenDy !== 0) {
       const castingSpellId = this.hud?.getCastingSpellId();
       if (castingSpellId != null) this.hud?.cancelCast(castingSpellId);
     }
 
-    if (dx !== this.lastSent.dx || dy !== this.lastSent.dy) {
-      this.lastSent = { dx, dy };
-      this.room.send("move", { dx, dy, direction: this.lastDirection });
+    // WASD/arrows express screen-relative intent ("Up" = visually up), but
+    // movement (both the server and local prediction) happens in raw
+    // world-space — remap so pressing Up doesn't walk the character
+    // diagonally just because the world is now rendered isometrically.
+    const worldDir = isoUnprojectDirection(screenDx, screenDy);
+
+    if (screenDx !== this.lastSent.dx || screenDy !== this.lastSent.dy) {
+      this.lastSent = { dx: screenDx, dy: screenDy };
+      this.room.send("move", { dx: worldDir.x, dy: worldDir.y, direction: this.lastDirection });
     }
 
     // Predict the local player's movement immediately instead of waiting on
     // the network round-trip; resolveMovement is the same collision function
     // the server uses, so prediction can't walk through a wall the server
-    // would also block.
-    if (dx !== 0 || dy !== 0) {
+    // would also block. Reads/writes local.worldX/Y (raw simulation space)
+    // rather than targetX/Y — targetX/Y is continuously overwritten by
+    // server state broadcasts, so using it here would snap prediction back
+    // to a network-lagged position on every tick (rubber-banding).
+    if (screenDx !== 0 || screenDy !== 0) {
       const local = this.entities.get(this.room.sessionId);
       if (local?.isLocal) {
         const resolved = resolveMovement(
-          this.mapGrid,
-          local.rect.x,
-          local.rect.y,
-          dx * MOVE_SPEED * dt,
-          dy * MOVE_SPEED * dt,
+          this.chunkCache,
+          local.worldX,
+          local.worldY,
+          worldDir.x * MOVE_SPEED * dt,
+          worldDir.y * MOVE_SPEED * dt,
         );
-        local.rect.x = resolved.x;
-        local.rect.y = resolved.y;
-        local.targetX = resolved.x;
-        local.targetY = resolved.y;
+        local.worldX = resolved.x;
+        local.worldY = resolved.y;
+        const p = this.projectEntity(resolved.x, resolved.y);
+        local.rect.x = p.x;
+        local.rect.y = p.y;
+        local.rect.setDepth(p.depth);
         this.positionHpBar(local);
+        this.applyOcclusion(local, resolved.x, resolved.y);
       }
     }
   }
 
+  // Lerping happens in raw world space, then the result is projected for
+  // rendering — lerping rect.x/y directly (screen space) toward targetX/Y
+  // (world space) would mix two different coordinate systems.
   private updateRemoteEntities() {
     for (const entity of this.entities.values()) {
       if (entity.isLocal) continue;
-      entity.rect.x = Phaser.Math.Linear(entity.rect.x, entity.targetX, REMOTE_SMOOTHING);
-      entity.rect.y = Phaser.Math.Linear(entity.rect.y, entity.targetY, REMOTE_SMOOTHING);
+      entity.worldX = Phaser.Math.Linear(entity.worldX, entity.targetX, REMOTE_SMOOTHING);
+      entity.worldY = Phaser.Math.Linear(entity.worldY, entity.targetY, REMOTE_SMOOTHING);
+      const p = this.projectEntity(entity.worldX, entity.worldY);
+      entity.rect.setPosition(p.x, p.y).setDepth(p.depth);
       this.positionHpBar(entity);
+      this.applyOcclusion(entity, entity.worldX, entity.worldY);
     }
 
     for (const entity of this.monsters.values()) {
-      entity.rect.x = Phaser.Math.Linear(entity.rect.x, entity.targetX, REMOTE_SMOOTHING);
-      entity.rect.y = Phaser.Math.Linear(entity.rect.y, entity.targetY, REMOTE_SMOOTHING);
+      entity.worldX = Phaser.Math.Linear(entity.worldX, entity.targetX, REMOTE_SMOOTHING);
+      entity.worldY = Phaser.Math.Linear(entity.worldY, entity.targetY, REMOTE_SMOOTHING);
+      const p = this.projectEntity(entity.worldX, entity.worldY);
+      entity.rect.setPosition(p.x, p.y).setDepth(p.depth);
       this.positionHpBar(entity);
+      this.applyOcclusion(entity, entity.worldX, entity.worldY);
     }
 
     for (const entity of this.projectiles.values()) {
-      entity.shape.x = Phaser.Math.Linear(entity.shape.x, entity.targetX, REMOTE_SMOOTHING);
-      entity.shape.y = Phaser.Math.Linear(entity.shape.y, entity.targetY, REMOTE_SMOOTHING);
+      entity.worldX = Phaser.Math.Linear(entity.worldX, entity.targetX, REMOTE_SMOOTHING);
+      entity.worldY = Phaser.Math.Linear(entity.worldY, entity.targetY, REMOTE_SMOOTHING);
+      const p = this.projectEntity(entity.worldX, entity.worldY);
+      entity.shape.setPosition(p.x, p.y).setDepth(p.depth);
     }
 
     if (this.target) {
       const entity = this.target.kind === "self" ? this.entities.get(this.room?.sessionId ?? "") : this.monsters.get(this.target.id);
-      if (entity) this.targetRing?.setPosition(entity.rect.x, entity.rect.y);
+      if (entity) this.targetRing?.setPosition(entity.rect.x, entity.rect.y).setDepth(entity.rect.depth + 1);
+
+      if (this.target.kind === "monster") {
+        const monster = this.monsters.get(this.target.id);
+        if (monster && monster.attackRange > 0) {
+          const size = isoCircleFootprint(monster.attackRange);
+          if (!this.attackRangeIndicator) {
+            this.attackRangeIndicator = this.add.ellipse(0, 0, size.width, size.height).setStrokeStyle(1, 0xff3333, 0.5);
+          }
+          this.attackRangeIndicator
+            .setPosition(monster.rect.x, monster.rect.y)
+            .setSize(size.width, size.height)
+            .setDepth(monster.rect.depth - 1)
+            .setVisible(true);
+        } else {
+          this.attackRangeIndicator?.setVisible(false);
+        }
+      } else {
+        this.attackRangeIndicator?.setVisible(false);
+      }
+
       this.refreshTargetPanel();
+    } else {
+      this.attackRangeIndicator?.setVisible(false);
     }
 
     if (this.aimingSpell && this.room) {
@@ -764,7 +1200,12 @@ export class WorldScene extends Phaser.Scene {
       if (local) {
         this.groundAoeRangeRing?.setPosition(local.rect.x, local.rect.y);
         const maxRange = spell?.maxRange ?? Infinity;
-        const inRange = Phaser.Math.Distance.Between(local.rect.x, local.rect.y, pointer.worldX, pointer.worldY) <= maxRange;
+        // In-range must compare raw world distances (matching how the
+        // server enforces maxRange), not projected-screen distances — the
+        // iso transform isn't uniform, so screen distance isn't
+        // proportional to real distance.
+        const rawPointer = isoUnproject(pointer.worldX, pointer.worldY);
+        const inRange = Phaser.Math.Distance.Between(local.worldX, local.worldY, rawPointer.x, rawPointer.y) <= maxRange;
         const color = inRange ? (spell?.color ?? 0xffffff) : 0xff3333;
         this.groundAoePreviewRing?.setStrokeStyle(1, color, 0.6).setFillStyle(color, 0.12);
       }

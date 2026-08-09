@@ -1,6 +1,14 @@
-import { EQUIPMENT_SLOTS, type EquipmentSlot, type ItemSlotType, type InventoryStateMessage } from "shared";
+import {
+  EQUIPMENT_SLOTS,
+  canLearnTalent,
+  type EquipmentSlot,
+  type ItemSlotType,
+  type InventoryStateMessage,
+  type TalentTemplateDTO,
+  type LearnedTalentView,
+} from "shared";
 
-type PanelKey = "chat" | "inventory" | "quests" | "stats";
+type PanelKey = "chat" | "inventory" | "quests" | "stats" | "talents";
 
 const SLOT_LABELS: Record<EquipmentSlot, string> = {
   helmet: "Helmet",
@@ -29,7 +37,25 @@ export interface InventoryHandlers {
   onUnequip: (slot: EquipmentSlot) => void;
 }
 
-const KEY_TO_PANEL: Record<string, PanelKey> = { c: "chat", i: "inventory", l: "quests", k: "stats" };
+export interface TalentHandlers {
+  onLearn: (talentId: string) => void;
+}
+
+export interface AdminHandlers {
+  onLevelTo10: () => void;
+}
+
+// defs is the class's full tree definition (content, fetched once via REST —
+// see net/api.ts's fetchTalents), while points/learned are the private,
+// server-pushed per-character progress (see TalentStateMessage) — this view
+// just combines the two so renderTalents doesn't need two separate inputs.
+export interface TalentPanelData {
+  points: number;
+  learned: LearnedTalentView[];
+  defs: TalentTemplateDTO[];
+}
+
+const KEY_TO_PANEL: Record<string, PanelKey> = { c: "chat", i: "inventory", l: "quests", k: "stats", t: "talents" };
 const DEFAULT_PANEL: PanelKey = "chat";
 
 // Placeholder body copy until each panel grows real content/state of its own.
@@ -38,6 +64,7 @@ const PANEL_PLACEHOLDER: Record<PanelKey, string> = {
   inventory: "Inventory coming soon",
   quests: "No active quests",
   stats: "Not in a game yet",
+  talents: "Not in a game yet",
 };
 
 export interface QuestLogEntry {
@@ -97,6 +124,10 @@ export class Sidebar {
   private stats: CharacterStatsView | null = null;
   private inventory: InventoryStateMessage | null = null;
   private inventoryHandlers: InventoryHandlers | null = null;
+  private talents: TalentPanelData | null = null;
+  private talentHandlers: TalentHandlers | null = null;
+  private isAdmin = false;
+  private adminHandlers: AdminHandlers | null = null;
 
   constructor() {
     this.bodyEl = document.querySelector<HTMLElement>("#sidebar-body")!;
@@ -146,6 +177,28 @@ export class Sidebar {
     if (this.currentPanel === "inventory") this.render();
   }
 
+  setTalentHandlers(handlers: TalentHandlers) {
+    this.talentHandlers = handlers;
+  }
+
+  setTalents(talents: TalentPanelData) {
+    this.talents = talents;
+    if (this.currentPanel === "talents") this.render();
+  }
+
+  setAdminHandlers(handlers: AdminHandlers) {
+    this.adminHandlers = handlers;
+  }
+
+  // Debug/testing tools shown only to admin accounts (see WorldScene, which
+  // resolves this from the logged-in account's role) — currently just a
+  // shortcut to fast-forward to level 10 and unlock talent points, added to
+  // the character sheet since that's where level/points are shown.
+  setAdmin(isAdmin: boolean) {
+    this.isAdmin = isAdmin;
+    if (this.currentPanel === "stats") this.render();
+  }
+
   private render() {
     this.bodyEl.innerHTML = "";
 
@@ -159,6 +212,10 @@ export class Sidebar {
     }
     if (this.currentPanel === "inventory" && this.inventory) {
       this.renderInventory(this.inventory);
+      return;
+    }
+    if (this.currentPanel === "talents" && this.talents) {
+      this.renderTalents(this.talents);
       return;
     }
 
@@ -259,6 +316,19 @@ export class Sidebar {
     statRow(statsList, "Critical Chance", `${stats.criticalChance.toFixed(0)}%`);
     sheet.appendChild(statsList);
 
+    if (this.isAdmin) {
+      const adminSection = document.createElement("div");
+      adminSection.id = "admin-tools";
+      const adminLabel = document.createElement("div");
+      adminLabel.className = "talent-tier-label";
+      adminLabel.textContent = "Admin Tools";
+      const levelBtn = document.createElement("button");
+      levelBtn.textContent = "⚡ Level to 10";
+      levelBtn.addEventListener("click", () => this.adminHandlers?.onLevelTo10());
+      adminSection.append(adminLabel, levelBtn);
+      sheet.appendChild(adminSection);
+    }
+
     this.bodyEl.appendChild(sheet);
   }
 
@@ -339,6 +409,121 @@ export class Sidebar {
     wrapper.appendChild(bagList);
 
     this.bodyEl.appendChild(wrapper);
+  }
+
+  // WoW-style tree: each talent is a square icon (name initials, hover for
+  // the full name/description/rank via a CSS-only tooltip) laid out one flex
+  // row per tier; a prerequisite relationship is drawn as a connecting line
+  // rather than spelled out in text, lit up once the prerequisite has a
+  // point in it.
+  private renderTalents(data: TalentPanelData) {
+    const wrapper = document.createElement("div");
+    wrapper.id = "talents-panel";
+
+    const pointsLabel = document.createElement("div");
+    pointsLabel.id = "talent-points";
+    pointsLabel.textContent = `${data.points} point${data.points === 1 ? "" : "s"} available`;
+    wrapper.appendChild(pointsLabel);
+
+    if (data.defs.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "bag-empty";
+      empty.textContent = "This class has no talents yet";
+      wrapper.append(empty);
+      this.bodyEl.appendChild(wrapper);
+      return;
+    }
+
+    const learnedRanks = new Map(data.learned.map((l) => [l.talentId, l.rank]));
+
+    const byTier = new Map<number, TalentTemplateDTO[]>();
+    for (const talent of data.defs) {
+      const list = byTier.get(talent.tier) ?? [];
+      list.push(talent);
+      byTier.set(talent.tier, list);
+    }
+    const tiers = [...byTier.keys()].sort((a, b) => a - b);
+
+    const tree = document.createElement("div");
+    tree.id = "talent-tree";
+
+    // Namespaced element creation (createElementNS, not createElement) is
+    // required for SVG — the plain DOM API would create an invalid/inert
+    // HTML element named "svg" instead of a real SVG node.
+    const svgNs = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.id = "talent-lines";
+    tree.appendChild(svg);
+
+    const nodeEls = new Map<string, HTMLElement>();
+
+    for (const tier of tiers) {
+      const row = document.createElement("div");
+      row.className = "talent-tier-row";
+
+      for (const talent of byTier.get(tier) ?? []) {
+        const rank = learnedRanks.get(talent.id) ?? 0;
+        const maxed = rank >= talent.maxRank;
+        // Same rule the server enforces on learnTalent (see
+        // WorldRoom.handleLearnTalent) — evaluated here purely for display,
+        // the server is still the actual gate.
+        const learnable = canLearnTalent(talent, learnedRanks, data.points);
+
+        const icon = document.createElement("div");
+        icon.className = `talent-node-icon ${learnable ? "learnable" : maxed ? "maxed" : "locked"}`;
+        icon.textContent = talent.name.slice(0, 2).toUpperCase();
+        if (learnable) icon.addEventListener("click", () => this.talentHandlers?.onLearn(talent.id));
+
+        const rankBadge = document.createElement("span");
+        rankBadge.className = "talent-node-rank-badge";
+        rankBadge.textContent = `${rank}/${talent.maxRank}`;
+        icon.appendChild(rankBadge);
+
+        const tooltip = document.createElement("div");
+        tooltip.className = "talent-tooltip";
+        const tooltipTitle = document.createElement("div");
+        tooltipTitle.className = "talent-tooltip-title";
+        tooltipTitle.textContent = talent.name;
+        const tooltipDesc = document.createElement("div");
+        tooltipDesc.className = "talent-tooltip-desc";
+        tooltipDesc.textContent = talent.description;
+        const tooltipRank = document.createElement("div");
+        tooltipRank.className = "talent-tooltip-rank";
+        tooltipRank.textContent = `Rank ${rank} / ${talent.maxRank}`;
+        tooltip.append(tooltipTitle, tooltipDesc, tooltipRank);
+        icon.appendChild(tooltip);
+
+        row.appendChild(icon);
+        nodeEls.set(talent.id, icon);
+      }
+      tree.appendChild(row);
+    }
+
+    wrapper.appendChild(tree);
+    this.bodyEl.appendChild(wrapper);
+
+    // Node positions (offsetLeft/offsetTop) only reflect real layout once
+    // the browser has actually laid the tree out, which hasn't necessarily
+    // happened synchronously right after appending — deferring to the next
+    // frame guarantees it has.
+    requestAnimationFrame(() => {
+      svg.setAttribute("width", String(tree.scrollWidth));
+      svg.setAttribute("height", String(tree.scrollHeight));
+      for (const talent of data.defs) {
+        if (!talent.prerequisiteId) continue;
+        const from = nodeEls.get(talent.prerequisiteId);
+        const to = nodeEls.get(talent.id);
+        if (!from || !to) continue;
+
+        const line = document.createElementNS(svgNs, "line");
+        line.setAttribute("x1", String(from.offsetLeft + from.offsetWidth / 2));
+        line.setAttribute("y1", String(from.offsetTop + from.offsetHeight / 2));
+        line.setAttribute("x2", String(to.offsetLeft + to.offsetWidth / 2));
+        line.setAttribute("y2", String(to.offsetTop + to.offsetHeight / 2));
+        line.setAttribute("class", `talent-line${(learnedRanks.get(talent.prerequisiteId) ?? 0) > 0 ? " active" : ""}`);
+        svg.appendChild(line);
+      }
+    });
   }
 }
 

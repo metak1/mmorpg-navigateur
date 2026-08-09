@@ -1,5 +1,4 @@
-import { TileType } from "shared";
-import type { GameMapDTO, GameMapInput } from "shared";
+import type { GameMapDTO, GameMapInput, MapTileDTO } from "shared";
 import { api } from "../api.js";
 import { renderTable } from "../ui.js";
 import { renderMapEditor, type EditableMap } from "../mapEditor.js";
@@ -19,40 +18,29 @@ export async function renderMapsPage(container: HTMLElement) {
 
     const nameInput = document.createElement("input");
     nameInput.value = "New Map";
-    const widthInput = document.createElement("input");
-    widthInput.type = "number";
-    widthInput.value = "25";
-    const heightInput = document.createElement("input");
-    heightInput.type = "number";
-    heightInput.value = "18";
 
     const createBtn = document.createElement("button");
     createBtn.textContent = "New Map";
     createBtn.addEventListener("click", () => {
-      const width = Number(widthInput.value);
-      const height = Number(heightInput.value);
       const tileSize = 32;
-      const tileData = Array.from({ length: height }, () => Array.from({ length: width }, () => TileType.Grass as number));
 
+      // A brand-new map is an empty, unbounded canvas — everywhere defaults
+      // to Grass until painted, so there's nothing to size up front. Spawn
+      // starts at the world origin; the editor opens centered on it.
       void showEditor({
         name: nameInput.value || "New Map",
-        width,
-        height,
         tileSize,
-        tileData,
-        spawnX: Math.floor(width / 2) * tileSize + tileSize / 2,
-        spawnY: Math.floor(height / 2) * tileSize + tileSize / 2,
+        spawnX: tileSize / 2,
+        spawnY: tileSize / 2,
+        ambientSpawnChance: 0.3,
+        cliffColor: 0x6b4a2f, // dirt brown
         spawns: [],
         npcSpawns: [],
+        ambientSpawns: [],
       });
     });
 
-    newMapForm.append(
-      labeled("Name", nameInput),
-      labeled("Width (tiles)", widthInput),
-      labeled("Height (tiles)", heightInput),
-      createBtn,
-    );
+    newMapForm.append(labeled("Name", nameInput), createBtn);
     container.appendChild(newMapForm);
 
     const tableSection = document.createElement("div");
@@ -63,8 +51,7 @@ export async function renderMapsPage(container: HTMLElement) {
       tableSection,
       [
         { key: "name", label: "Name" },
-        { key: "width", label: "Width" },
-        { key: "height", label: "Height" },
+        { key: "ambientSpawnChance", label: "Ambient Spawn Chance" },
         { key: "isActive", label: "Active", format: (v) => (v ? "Yes" : "No") },
       ],
       maps,
@@ -111,17 +98,19 @@ export async function renderMapsPage(container: HTMLElement) {
       map,
       monsters,
       npcs,
-      async (input: GameMapInput) => {
-        try {
-          if (map.id) {
-            await api.updateMap(map.id, input);
-          } else {
-            await api.createMap(input);
-          }
-          await showList();
-        } catch (err) {
-          alert(err instanceof Error ? err.message : String(err));
+      (minCol, minRow, maxCol, maxRow) => {
+        if (!map.id) return Promise.resolve([]);
+        return api.getMapTiles(map.id, minCol, minRow, maxCol, maxRow);
+      },
+      async (input: GameMapInput, tiles: MapTileDTO[]) => {
+        // Two-step: the map needs an id before tiles can be saved against
+        // it, so a brand-new map is created first (base fields only), then
+        // any painted tiles are flushed in a second request.
+        const saved = map.id ? await api.updateMap(map.id, input) : await api.createMap(input);
+        if (tiles.length > 0) {
+          await api.putMapTiles(saved.id, tiles);
         }
+        await showList();
       },
       () => void showList(),
     );

@@ -7,6 +7,7 @@ import type {
   SpellTemplateInput,
   GameMapDTO,
   GameMapInput,
+  MapTileDTO,
   AccountDTO,
   AuthResponse,
   NpcTemplateDTO,
@@ -15,6 +16,8 @@ import type {
   ItemTemplateInput,
   QuestDTO,
   QuestInput,
+  TalentTemplateDTO,
+  TalentTemplateInput,
 } from "shared";
 import { getToken, clearToken } from "./auth.js";
 
@@ -93,6 +96,10 @@ export const api = {
     request<GameMapDTO>(`/api/maps/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteMap: (id: string) => request<void>(`/api/maps/${id}`, { method: "DELETE" }),
   activateMap: (id: string) => request<void>(`/api/maps/${id}/activate`, { method: "POST" }),
+  getMapTiles: (mapId: string, minCol: number, minRow: number, maxCol: number, maxRow: number) =>
+    request<MapTileDTO[]>(`/api/maps/${mapId}/tiles?minCol=${minCol}&minRow=${minRow}&maxCol=${maxCol}&maxRow=${maxRow}`),
+  putMapTiles: (mapId: string, tiles: MapTileDTO[]) =>
+    request<void>(`/api/maps/${mapId}/tiles`, { method: "PUT", body: JSON.stringify({ tiles }) }),
 
   listNpcs: () => request<NpcTemplateDTO[]>("/api/npcs"),
   createNpc: (data: NpcTemplateInput) => request<NpcTemplateDTO>("/api/npcs", { method: "POST", body: JSON.stringify(data) }),
@@ -112,4 +119,11 @@ export const api = {
   updateQuest: (id: string, data: QuestInput) =>
     request<QuestDTO>(`/api/quests/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteQuest: (id: string) => request<void>(`/api/quests/${id}`, { method: "DELETE" }),
+
+  listTalents: () => request<TalentTemplateDTO[]>("/api/talents"),
+  createTalent: (data: TalentTemplateInput) =>
+    request<TalentTemplateDTO>("/api/talents", { method: "POST", body: JSON.stringify(data) }),
+  updateTalent: (id: string, data: TalentTemplateInput) =>
+    request<TalentTemplateDTO>(`/api/talents/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteTalent: (id: string) => request<void>(`/api/talents/${id}`, { method: "DELETE" }),
 };

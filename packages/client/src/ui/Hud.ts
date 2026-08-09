@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { GLOBAL_COOLDOWN_MS, type SpellDef, type SpellId } from "shared";
+import { GLOBAL_COOLDOWN_MS, UI_DEPTH, type SpellDef, type SpellId } from "shared";
 
 const HP_BAR_X = 16;
 const HP_BAR_BOTTOM_MARGIN = 40; // distance from the bottom edge to the bar's vertical center
@@ -54,36 +54,36 @@ export class Hud {
       .rectangle(HP_BAR_X, hpBarY, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222)
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
-      .setDepth(1000);
+      .setDepth(UI_DEPTH);
     this.hpBarFill = scene.add
       .rectangle(HP_BAR_X, hpBarY, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x33dd55)
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
-      .setDepth(1001);
+      .setDepth(UI_DEPTH + 1);
     this.hpText = scene.add
       .text(HP_BAR_X + HP_BAR_WIDTH / 2, hpBarY, "", { fontSize: "13px", color: "#ffffff" })
       .setOrigin(0.5)
       .setScrollFactor(0)
-      .setDepth(1002);
+      .setDepth(UI_DEPTH + 2);
 
     const levelTextY = hpBarY - HP_BAR_HEIGHT / 2 - LEVEL_BAR_GAP - LEVEL_BAR_HEIGHT - LEVEL_TEXT_GAP;
     this.levelText = scene.add
       .text(HP_BAR_X, levelTextY, "Lvl 1", { fontSize: "12px", color: "#ffcc33" })
       .setOrigin(0, 1)
       .setScrollFactor(0)
-      .setDepth(1002);
+      .setDepth(UI_DEPTH + 2);
 
     const xpBarY = hpBarY - HP_BAR_HEIGHT / 2 - LEVEL_BAR_GAP - LEVEL_BAR_HEIGHT / 2;
     scene.add
       .rectangle(HP_BAR_X, xpBarY, LEVEL_BAR_WIDTH, LEVEL_BAR_HEIGHT, 0x222222)
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
-      .setDepth(1000);
+      .setDepth(UI_DEPTH);
     this.xpBarFill = scene.add
       .rectangle(HP_BAR_X, xpBarY, 0, LEVEL_BAR_HEIGHT, 0x33aaff)
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
-      .setDepth(1001);
+      .setDepth(UI_DEPTH + 1);
 
     const totalWidth = order.length * SLOT_SIZE + (order.length - 1) * SLOT_GAP;
     const startX = scene.scale.width / 2 - totalWidth / 2;
@@ -93,7 +93,7 @@ export class Hud {
       const y = slotY + SLOT_SIZE / 2;
       const iconBottom = y + SLOT_ICON_SIZE / 2;
 
-      const icon = scene.add.rectangle(x, y, SLOT_ICON_SIZE, SLOT_ICON_SIZE, 0x444444).setScrollFactor(0).setDepth(1000);
+      const icon = scene.add.rectangle(x, y, SLOT_ICON_SIZE, SLOT_ICON_SIZE, 0x444444).setScrollFactor(0).setDepth(UI_DEPTH);
       if (onSlotClick) {
         icon.setInteractive({ useHandCursor: true }).on("pointerdown", (pointer: Phaser.Input.Pointer) => {
           if (pointer.leftButtonDown()) onSlotClick(spellId);
@@ -103,22 +103,22 @@ export class Hud {
         .rectangle(x, y, SLOT_SIZE, SLOT_SIZE)
         .setStrokeStyle(2, 0xffffff, 0.6)
         .setScrollFactor(0)
-        .setDepth(1001);
+        .setDepth(UI_DEPTH + 1);
       const cooldownOverlay = scene.add
         .rectangle(x, iconBottom, SLOT_ICON_SIZE, 0, 0x000000, 0.7)
         .setOrigin(0.5, 1)
         .setScrollFactor(0)
-        .setDepth(1002)
+        .setDepth(UI_DEPTH + 2)
         .setVisible(false);
       scene.add
-        .text(x - SLOT_SIZE / 2 + 4, y - SLOT_SIZE / 2 + 2, keyLabel, { fontSize: "11px", color: "#ffffff" })
+        .text(x - SLOT_SIZE / 2 + 4, y - SLOT_SIZE / 2 + 2, keyLabel, { fontSize: "11px", color: "#000000" })
         .setScrollFactor(0)
-        .setDepth(1003);
+        .setDepth(UI_DEPTH + 3);
       const cooldownText = scene.add
         .text(x, y, "", { fontSize: "14px", color: "#ffffff" })
         .setOrigin(0.5)
         .setScrollFactor(0)
-        .setDepth(1004)
+        .setDepth(UI_DEPTH + 4)
         .setVisible(false);
 
       this.slots.set(spellId, { icon, cooldownOverlay, cooldownText, cooldownMs: 0, castTimeMs: 0, lastCastAt: -Infinity });
@@ -128,17 +128,17 @@ export class Hud {
     const castBarBg = scene.add
       .rectangle(scene.scale.width / 2, castBarY, CAST_BAR_WIDTH, CAST_BAR_HEIGHT, 0x111111, 0.8)
       .setScrollFactor(0)
-      .setDepth(1000);
+      .setDepth(UI_DEPTH);
     this.castBarFill = scene.add
       .rectangle(scene.scale.width / 2 - CAST_BAR_WIDTH / 2, castBarY, 0, CAST_BAR_HEIGHT, 0xffcc33)
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
-      .setDepth(1001);
+      .setDepth(UI_DEPTH + 1);
     this.castBarText = scene.add
       .text(scene.scale.width / 2, castBarY, "", { fontSize: "12px", color: "#ffffff" })
       .setOrigin(0.5)
       .setScrollFactor(0)
-      .setDepth(1002);
+      .setDepth(UI_DEPTH + 2);
     this.castBarParts = [castBarBg, this.castBarFill, this.castBarText];
     this.setCastBarVisible(false);
   }
@@ -198,6 +198,18 @@ export class Hud {
       this.casting = null;
       this.setCastBarVisible(false);
     }
+  }
+
+  // Like cancelCast, but also rolls back the GCD — used specifically when
+  // the server rejects a cast it never actually accepted (see
+  // CastFailedMessage, e.g. no line of sight), as opposed to one that was
+  // accepted and later fizzled/was interrupted. beginCast applies the GCD
+  // optimistically the moment the client sends "cast"; if the server turns
+  // around and refuses it, that GCD was never really spent, so leaving it
+  // in place (like cancelCast does) would lock out casting for no reason.
+  rejectCast(spellId: SpellId) {
+    this.cancelCast(spellId);
+    this.lastGlobalCastAt = -Infinity;
   }
 
   beginCast(spellId: SpellId, spellName: string, nowMs: number) {

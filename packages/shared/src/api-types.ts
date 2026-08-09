@@ -59,6 +59,48 @@ export interface SpellTemplateDTO {
 
 export type SpellTemplateInput = Omit<SpellTemplateDTO, "id">;
 
+export type TalentEffectType = "statBonus" | "spellModifier" | "mechanicFlag";
+export type TalentBonusMode = "flat" | "percent";
+export type TalentStatKey = "armor" | "strength" | "intelligence" | "dexterity" | "criticalChance" | "maxHp";
+export type TalentSpellParam = "damage" | "cooldownMs" | "aoeRadius" | "healAmount" | "maxRange";
+
+// Fixed, growing set of bespoke gameplay hooks a mechanicFlag effect can
+// name. Each flag's actual behavior is hand-coded server-side separately,
+// one at a time, as requested — this list is only the admin-authorable
+// source of truth for which flag names exist to attach to a talent.
+export const TALENT_MECHANIC_FLAGS = ["extraDashCharge", "lifestealOnCrit"] as const;
+export type TalentMechanicFlag = (typeof TALENT_MECHANIC_FLAGS)[number];
+
+export interface TalentEffectDTO {
+  id: string;
+  effectType: TalentEffectType;
+  // statBonus
+  statKey: TalentStatKey | null;
+  // spellModifier
+  spellTemplateId: string | null;
+  spellParam: TalentSpellParam | null;
+  // statBonus & spellModifier
+  bonusMode: TalentBonusMode | null;
+  valuePerRank: number | null;
+  // mechanicFlag
+  flagName: TalentMechanicFlag | null;
+}
+
+export type TalentEffectInput = Omit<TalentEffectDTO, "id">;
+
+export interface TalentTemplateDTO {
+  id: string;
+  classId: string;
+  name: string;
+  description: string;
+  tier: number;
+  maxRank: number;
+  prerequisiteId: string | null;
+  effects: TalentEffectDTO[];
+}
+
+export type TalentTemplateInput = Omit<TalentTemplateDTO, "id" | "effects"> & { effects: TalentEffectInput[] };
+
 export interface MonsterSpawnDTO {
   id: string;
   mapId: string;
@@ -168,32 +210,61 @@ export interface QuestDTO {
 
 export type QuestInput = Omit<QuestDTO, "id" | "rewardItems"> & { rewardItems: QuestRewardItemInput[] };
 
+export interface AmbientSpawnDTO {
+  id: string;
+  monsterTemplateId: string;
+  weight: number;
+}
+
+export type AmbientSpawnInput = Omit<AmbientSpawnDTO, "id">;
+
 export interface GameMapDTO {
   id: string;
   name: string;
-  width: number;
-  height: number;
   tileSize: number;
-  tileData: number[][];
   spawnX: number;
   spawnY: number;
   isActive: boolean;
+  ambientSpawnChance: number;
+  // Solid fill color (0xrrggbb) for the "riser" face drawn between two
+  // adjacent tiles with different elevation — purely cosmetic.
+  cliffColor: number;
   spawns: MonsterSpawnDTO[];
   npcSpawns: NpcSpawnDTO[];
+  ambientSpawns: AmbientSpawnDTO[];
 }
 
-export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns"> & {
+export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns" | "ambientSpawns"> & {
   spawns: MonsterSpawnInput[];
   npcSpawns: NpcSpawnInput[];
+  ambientSpawns: AmbientSpawnInput[];
 };
 
+// The active map's terrain is not shipped in this response — it's infinite,
+// so the client fetches tiles on demand in ranges (see MapTileDTO) via a
+// ChunkTileCache instead. This is just enough metadata to bootstrap that.
 export interface ActiveMapResponse {
-  width: number;
-  height: number;
+  mapId: string;
   tileSize: number;
-  tileData: number[][];
   spawnX: number;
   spawnY: number;
+  cliffColor: number;
+}
+
+export interface MapTileDTO {
+  col: number;
+  row: number;
+  tileType: number;
+  elevation: number;
+}
+
+// A tile entry with tileType equal to TileType.Grass (0) AND elevation
+// equal to 0 means "reset to default" — the server deletes that row rather
+// than storing an explicit default override, keeping the sparse table
+// sparse. Any other combination (including Grass at a nonzero elevation)
+// is stored explicitly.
+export interface MapTilesUpdateInput {
+  tiles: MapTileDTO[];
 }
 
 export interface AccountDTO {

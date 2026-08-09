@@ -3,7 +3,7 @@
 // templates are loaded once at room creation for performance, so without
 // this an admin edit would only take effect for the *next* room, i.e. after
 // a server restart.
-export type ContentKind = "spells" | "monsters" | "quests";
+export type ContentKind = "spells" | "monsters" | "quests" | "maps" | "talents";
 type Listener = (kind: ContentKind) => void;
 
 const listeners = new Set<Listener>();
