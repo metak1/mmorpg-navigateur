@@ -19,6 +19,7 @@ import type {
   InventoryStateMessage,
   EquipActionFailedMessage,
   LootDroppedMessage,
+  XpGainedMessage,
   CompletedQuestsStateMessage,
   TalentTemplateDTO,
   TalentStateMessage,
@@ -30,6 +31,11 @@ import type {
   PartyInviteReceivedMessage,
   PartyStateMessage,
   PartyActionFailedMessage,
+  PartyApplicantView,
+  PartyApplicationsStateMessage,
+  PartyApplicationDeclinedMessage,
+  OpenPartyView,
+  OpenPartiesStateMessage,
 } from "shared";
 import {
   MOVE_SPEED,
@@ -54,6 +60,9 @@ import { Hud } from "../ui/Hud.js";
 import { npcDialogue } from "../ui/NpcDialogue.js";
 import { sidebar, type OnlinePlayerView } from "../ui/Sidebar.js";
 import { dungeonPrompt } from "../ui/DungeonPrompt.js";
+import { groupFinder, type GroupFinderData, type GroupFinderHandlers } from "../ui/GroupFinder.js";
+import { partyFrames, type PartyFrameMember } from "../ui/PartyFrames.js";
+import { dungeonObjectives, type DungeonObjectiveView } from "../ui/DungeonObjectives.js";
 
 const REMOTE_SMOOTHING = 0.25; // lerp factor applied per frame toward server position
 // The local player predicts its own movement (see updateInput) and never
@@ -77,6 +86,8 @@ const HP_BAR_OFFSET_Y = 20;
 // indicator and its HP bar don't get visually confused with the channel bar.
 const CAST_BAR_HEIGHT = 4;
 const CAST_BAR_OFFSET_Y = HP_BAR_OFFSET_Y + 8;
+// Clear of both the HP bar and (for monsters) the cast bar above it.
+const NAME_TEXT_OFFSET_Y = CAST_BAR_OFFSET_Y + 12;
 // Opacity applied to an entity's sprite + HP bar while standing behind a
 // cliff tall enough to hide them (see isHiddenByTerrain) — faded rather
 // than fully invisible so the entity doesn't just vanish/pop.
@@ -109,6 +120,7 @@ interface HpBarHolder {
   rect: Phaser.GameObjects.Rectangle;
   hpBarBg: Phaser.GameObjects.Rectangle;
   hpBarFill: Phaser.GameObjects.Rectangle;
+  nameText: Phaser.GameObjects.Text;
 }
 
 // Every mover tracks position in two coordinate systems: worldX/Y (raw
@@ -226,14 +238,17 @@ export class WorldScene extends Phaser.Scene {
   // learnTalent round-trip instead of the moment a level-up grants one.
   private talentsLearnedCache: TalentStateMessage["learned"] = [];
   private spellDefs = new Map<SpellId, SpellDef>();
-  // Mirrors of the two pieces of state the dungeon-entry prompt (see
-  // DungeonPrompt) needs but doesn't otherwise have a subscription to —
-  // refreshOnlinePlayers/the "partyState" handler already compute these for
-  // the sidebar's Party tab, this just keeps a copy so the prompt (which may
-  // pop open at any time, independent of which sidebar tab is active) can
-  // render an up-to-date roster/invite list without its own room listeners.
+  // Mirrors of the party/group-finder state GroupFinder needs — kept here
+  // (rather than only inside Sidebar) so the copy docked alongside the
+  // dungeon-entry prompt (see DungeonPrompt), which may pop open at any
+  // time independent of which sidebar tab is active, can render up to date
+  // without its own room listeners.
   private onlinePlayers: OnlinePlayerView[] = [];
-  private partyState: PartyStateMessage = { leaderSessionId: null, members: [] };
+  private partyState: PartyStateMessage = { leaderSessionId: null, members: [], open: false };
+  private partyApplicants: PartyApplicantView[] = [];
+  private openParties: OpenPartyView[] = [];
+  // Locally tracked optimistically — see GroupFinderData.myPendingApplications.
+  private myPendingApplications = new Set<string>();
   private target: Target | null = null;
   private targetRing?: Phaser.GameObjects.Rectangle;
   // Shows the targeted monster's real attackRange footprint — under iso
@@ -252,6 +267,7 @@ export class WorldScene extends Phaser.Scene {
   private groundAoePreviewRing?: Phaser.GameObjects.Ellipse;
   private groundAoeRangeRing?: Phaser.GameObjects.Ellipse;
   private castFailedText?: Phaser.GameObjects.Text;
+  private dungeonClearedText?: Phaser.GameObjects.Text;
 
   constructor() {
     super("world");
@@ -287,6 +303,13 @@ export class WorldScene extends Phaser.Scene {
       fetchMe(this.token),
     ]);
     sidebar.setAdmin(account?.role === "admin");
+    // Clears out whatever the previous room's group last showed — switching
+    // rooms tears down and rebuilds the Phaser game, but PartyFrames is a
+    // DOM singleton that survives that (see main.ts's "switch-room"
+    // listener), and this room's own partyState may not arrive at all if
+    // the player ends up solo here.
+    partyFrames.update([]);
+    dungeonObjectives.update([]);
 
     this.chunkCache = new ChunkTileCache(activeMap.tileSize, (minCol, minRow, maxCol, maxRow) =>
       fetchMapTiles(activeMap.mapId, minCol, minRow, maxCol, maxRow),
@@ -386,6 +409,7 @@ export class WorldScene extends Phaser.Scene {
     });
     room.onMessage("inventoryState", (msg: InventoryStateMessage) => sidebar.setInventory(msg));
     room.onMessage("lootDropped", (msg: LootDroppedMessage) => this.playLootEffect(msg));
+    room.onMessage("xpGained", (msg: XpGainedMessage) => this.playXpGainedEffect(msg.amount));
     room.onMessage("completedQuestsState", (msg: CompletedQuestsStateMessage) => sidebar.setCompletedQuests(msg.quests));
     room.onMessage("equipActionFailed", (msg: EquipActionFailedMessage) => alert(msg.reason));
     sidebar.setInventoryHandlers({
@@ -407,8 +431,19 @@ export class WorldScene extends Phaser.Scene {
     // Switching rooms is handled by main.ts (a full fresh Phaser.Game, not
     // an in-place reconnect — see its "switch-room" listener) since
     // buildWorld's connect/listener setup only runs safely once per scene.
+    // Tearing down the Phaser.Game only destroys the client-side scene —
+    // this room's websocket connection is a separate object main.ts never
+    // touches, so without an explicit leave() here it stays open in the
+    // background. The server only removes a player from its synced state
+    // (WorldRoom.onLeave) when that connection actually closes, so leaving
+    // this out left a duplicate, un-despawning entity behind in whichever
+    // room was just left — both entering a dungeon (leaving the overworld)
+    // and exiting one (leaving the dungeon instance) go through this same
+    // handler, so this one leave() call covers both directions.
     room.onMessage("portalGranted", (msg: PortalGrantedMessage) => {
       dungeonPrompt.hide();
+      groupFinder.hide();
+      void room.leave();
       window.dispatchEvent(
         new CustomEvent("switch-room", {
           detail: { token: this.token, characterId: this.characterId, roomId: msg.roomId, mapId: msg.mapId },
@@ -416,20 +451,19 @@ export class WorldScene extends Phaser.Scene {
       );
     });
     room.onMessage("portalFailed", (msg: PortalFailedMessage) => alert(msg.reason));
-    room.onMessage("dungeonCleared", (_msg: DungeonClearedMessage) => alert("Dungeon cleared!"));
+    room.onMessage("dungeonCleared", (_msg: DungeonClearedMessage) => this.showDungeonClearedBanner());
 
     // Shown instead of entering immediately whenever the clicked portal
-    // leads to a dungeon — see WorldRoom.handleUsePortal. The party
-    // invite/leave buttons inside it send the exact same messages the
-    // sidebar's Party tab does; this is just a second surface for the same
-    // room-wide party system, not a separate one.
+    // leads to a dungeon — see WorldRoom.handleUsePortal. DungeonPrompt
+    // hands back a dock element that GroupFinder renders into, so the same
+    // create/invite/apply/leave group UI the sidebar's Party tab uses shows
+    // up right alongside "enter this dungeon" instead of requiring a detour.
     room.onMessage("dungeonPrompt", (msg: DungeonPromptMessage) => {
-      dungeonPrompt.show(msg, this.partyState, this.onlinePlayers, room.sessionId, {
-        onInvite: (targetSessionId) => room.send("inviteParty", { targetSessionId }),
-        onLeave: () => room.send("leaveParty", {}),
+      const groupDock = dungeonPrompt.show(msg, {
         onEnter: (portalId) => room.send("enterDungeon", { portalId }),
-        onCancel: () => {},
+        onCancel: () => groupFinder.hide(),
       });
+      groupFinder.show(groupDock, this.groupFinderData(room.sessionId), this.groupFinderHandlers(room));
     });
 
     room.onMessage("partyInviteReceived", (msg: PartyInviteReceivedMessage) => {
@@ -438,14 +472,33 @@ export class WorldScene extends Phaser.Scene {
     });
     room.onMessage("partyState", (msg: PartyStateMessage) => {
       this.partyState = msg;
+      // Can't have a pending application while actually in a group (the
+      // server rejects applyToParty otherwise) — joining one, whether via
+      // invite or an accepted application, means any leftover local
+      // "applied" state is necessarily stale.
+      if (msg.members.length > 0 && this.myPendingApplications.size > 0) this.myPendingApplications.clear();
       sidebar.setParty(msg);
-      dungeonPrompt.updateParty(msg);
+      groupFinder.update({ party: msg, myPendingApplications: this.myPendingApplications });
+      this.refreshPartyFrames();
     });
     room.onMessage("partyActionFailed", (msg: PartyActionFailedMessage) => alert(msg.reason));
-    sidebar.setPartyHandlers({
-      onInvite: (targetSessionId) => room.send("inviteParty", { targetSessionId }),
-      onLeave: () => room.send("leaveParty", {}),
+    room.onMessage("partyApplicationsState", (msg: PartyApplicationsStateMessage) => {
+      this.partyApplicants = msg.applicants;
+      sidebar.setApplicants(msg.applicants);
+      groupFinder.update({ applicants: msg.applicants });
     });
+    room.onMessage("partyApplicationDeclined", (msg: PartyApplicationDeclinedMessage) => {
+      this.myPendingApplications.delete(msg.partyId);
+      sidebar.setMyPendingApplications(this.myPendingApplications);
+      groupFinder.update({ myPendingApplications: this.myPendingApplications });
+      alert("Your application was declined.");
+    });
+    room.onMessage("openPartiesState", (msg: OpenPartiesStateMessage) => {
+      this.openParties = msg.parties;
+      sidebar.setOpenParties(msg.parties);
+      groupFinder.update({ openParties: msg.parties });
+    });
+    sidebar.setPartyHandlers(this.groupFinderHandlers(room));
 
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {
       const spellId = SPELL_KEY_CODES[event.code];
@@ -457,11 +510,12 @@ export class WorldScene extends Phaser.Scene {
       const color = isLocal ? 0x00ff88 : 0xff8800;
       const p = this.projectEntity(player.x, player.y);
       const rect = this.add.rectangle(p.x, p.y, 24, 24, color).setDepth(p.depth);
-      const { hpBarBg, hpBarFill } = this.createHpBar(p.x, p.y);
+      const { hpBarBg, hpBarFill, nameText } = this.createHpBar(p.x, p.y, player.name);
       const entity: PlayerEntity = {
         rect,
         hpBarBg,
         hpBarFill,
+        nameText,
         isLocal,
         worldX: player.x,
         worldY: player.y,
@@ -520,6 +574,11 @@ export class WorldScene extends Phaser.Scene {
         // sync so the HP bar's fraction doesn't render against a stale value.
         entity.maxHp = player.maxHp;
         hpBarFill.width = HP_BAR_WIDTH * Math.max(0, player.hp / entity.maxHp);
+        // Cheap — the party frames panel only ever has up to MAX_PARTY_SIZE
+        // rows — and only actually rebuilds anything when the player who
+        // just changed is one of them, so this is a no-op for everyone else
+        // moving/fighting nearby.
+        if (this.partyState.members.some((m) => m.sessionId === sessionId)) this.refreshPartyFrames();
         if (isLocal) {
           this.hud?.setHealth(player.hp, player.maxHp);
           this.hud?.setLevel(player.level, player.experience, player.xpToNextLevel);
@@ -538,6 +597,7 @@ export class WorldScene extends Phaser.Scene {
       entity?.rect.destroy();
       entity?.hpBarBg.destroy();
       entity?.hpBarFill.destroy();
+      entity?.nameText.destroy();
       this.entities.delete(sessionId);
       this.refreshOnlinePlayers();
     });
@@ -550,11 +610,12 @@ export class WorldScene extends Phaser.Scene {
         if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
         if (pointer.leftButtonDown()) this.setTarget({ kind: "monster", id });
       });
-      const { hpBarBg, hpBarFill } = this.createHpBar(p.x, p.y);
+      const { hpBarBg, hpBarFill, nameText } = this.createHpBar(p.x, p.y, monster.name);
       const entity: MonsterEntity = {
         rect,
         hpBarBg,
         hpBarFill,
+        nameText,
         worldX: monster.x,
         worldY: monster.y,
         targetX: monster.x,
@@ -612,6 +673,7 @@ export class WorldScene extends Phaser.Scene {
       entity?.rect.destroy();
       entity?.hpBarBg.destroy();
       entity?.hpBarFill.destroy();
+      entity?.nameText.destroy();
       entity?.castBarBg?.destroy();
       entity?.castBarFill?.destroy();
       this.monsters.delete(id);
@@ -661,6 +723,24 @@ export class WorldScene extends Phaser.Scene {
     $(room.state).portals.onRemove((_portal: Portal, id: string) => {
       this.portals.get(id)?.rect.destroy();
       this.portals.delete(id);
+    });
+
+    // Fixed at room creation (see WorldRoom.onCreate) — entries are never
+    // added/removed mid-session, only their progress/completed fields
+    // change, so onAdd just needs to wire each entry's own onChange once.
+    const syncDungeonObjectives = () => {
+      const objectives: DungeonObjectiveView[] = [...room.state.dungeonObjectives].map((o) => ({
+        id: o.id,
+        description: o.description,
+        progress: o.progress,
+        requiredCount: o.requiredCount,
+        completed: o.completed,
+      }));
+      dungeonObjectives.update(objectives);
+    };
+    $(room.state).dungeonObjectives.onAdd((objective) => {
+      $(objective).onChange(syncDungeonObjectives);
+      syncDungeonObjectives();
     });
 
     $(room.state).projectiles.onAdd((projectile: Projectile, id: string) => {
@@ -962,17 +1042,26 @@ export class WorldScene extends Phaser.Scene {
     return { x: proj.x, y: proj.y - isoElevationOffset(elevation, tileSize), depth: proj.y };
   }
 
-  private createHpBar(x: number, y: number) {
+  private createHpBar(x: number, y: number, name: string) {
     const barY = y - HP_BAR_OFFSET_Y;
     const hpBarBg = this.add.rectangle(x, barY, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x222222);
     const hpBarFill = this.add.rectangle(x - HP_BAR_WIDTH / 2, barY, HP_BAR_WIDTH, HP_BAR_HEIGHT, 0x33ff55).setOrigin(0, 0.5);
-    return { hpBarBg, hpBarFill };
+    const nameText = this.add
+      .text(x, y - NAME_TEXT_OFFSET_Y, name, {
+        fontSize: "11px",
+        color: "#ffffff",
+        backgroundColor: "#000000aa",
+        padding: { x: 3, y: 1 },
+      })
+      .setOrigin(0.5);
+    return { hpBarBg, hpBarFill, nameText };
   }
 
   private positionHpBar(entity: HpBarHolder) {
     const barY = entity.rect.y - HP_BAR_OFFSET_Y;
     entity.hpBarBg.setPosition(entity.rect.x, barY).setDepth(entity.rect.depth + 1);
     entity.hpBarFill.setPosition(entity.rect.x - HP_BAR_WIDTH / 2, barY).setDepth(entity.rect.depth + 2);
+    entity.nameText.setPosition(entity.rect.x, entity.rect.y - NAME_TEXT_OFFSET_Y).setDepth(entity.rect.depth + 3);
   }
 
   private createCastBar(x: number, y: number) {
@@ -1007,7 +1096,63 @@ export class WorldScene extends Phaser.Scene {
     });
     this.onlinePlayers = players;
     sidebar.setOnlinePlayers(players);
-    dungeonPrompt.updateOnlinePlayers(players);
+    groupFinder.update({ onlinePlayers: players });
+  }
+
+  // Reads hp/maxHp straight from room.state.players (always current) rather
+  // than the this.entities cache, so this works even the instant a fresh
+  // partyState arrives before that member's entity has necessarily synced.
+  private refreshPartyFrames() {
+    if (!this.room) return;
+    const room = this.room;
+    const members: PartyFrameMember[] = this.partyState.members.map((member) => {
+      const player = room.state.players.get(member.sessionId);
+      return {
+        sessionId: member.sessionId,
+        name: member.name,
+        hp: player?.hp ?? 0,
+        maxHp: player?.maxHp ?? 0,
+        isLeader: member.sessionId === this.partyState.leaderSessionId,
+        isSelf: member.sessionId === room.sessionId,
+      };
+    });
+    partyFrames.update(members);
+  }
+
+  // Bundles the party/group-finder state this scene mirrors into the shape
+  // GroupFinder.show wants — used both when docking it alongside a fresh
+  // dungeonPrompt and (indirectly, via Sidebar) for its own Party tab.
+  private groupFinderData(mySessionId: string): GroupFinderData {
+    return {
+      party: this.partyState,
+      onlinePlayers: this.onlinePlayers,
+      mySessionId,
+      applicants: this.partyApplicants,
+      openParties: this.openParties,
+      myPendingApplications: this.myPendingApplications,
+    };
+  }
+
+  private groupFinderHandlers(room: Room<RoomState>): GroupFinderHandlers {
+    return {
+      onCreateGroup: () => room.send("createParty", {}),
+      onInvite: (targetSessionId) => room.send("inviteParty", { targetSessionId }),
+      onLeave: () => room.send("leaveParty", {}),
+      onSetOpen: (open) => room.send("setPartyOpen", { open }),
+      onApply: (partyId) => {
+        this.myPendingApplications.add(partyId);
+        sidebar.setMyPendingApplications(this.myPendingApplications);
+        groupFinder.update({ myPendingApplications: this.myPendingApplications });
+        room.send("applyToParty", { partyId });
+      },
+      onWithdrawApplication: (partyId) => {
+        this.myPendingApplications.delete(partyId);
+        sidebar.setMyPendingApplications(this.myPendingApplications);
+        groupFinder.update({ myPendingApplications: this.myPendingApplications });
+        room.send("withdrawPartyApplication", { partyId });
+      },
+      onRespondApplication: (sessionId, accept) => room.send("respondPartyApplication", { sessionId, accept }),
+    };
   }
 
   // Fades an entity (and its HP bar) while a cliff tall enough to hide them
@@ -1018,6 +1163,7 @@ export class WorldScene extends Phaser.Scene {
     entity.rect.setAlpha(alpha);
     entity.hpBarBg.setAlpha(alpha);
     entity.hpBarFill.setAlpha(alpha);
+    entity.nameText.setAlpha(alpha);
   }
 
   // Ground-targeted spells are a two-step cast: activating the spell (hotkey
@@ -1140,7 +1286,7 @@ export class WorldScene extends Phaser.Scene {
       const label = drop.quantity > 1 ? `+${drop.quantity}x ${drop.name}` : `+${drop.name}`;
       const text = this.add
         .text(local.rect.x, local.rect.y - HP_BAR_OFFSET_Y - 14 - i * 16, label, {
-          fontSize: "13px",
+          fontSize: "15px",
           color: RARITY_TEXT_COLORS[drop.rarity] ?? "#ffffff",
         })
         .setOrigin(0.5, 1)
@@ -1153,6 +1299,31 @@ export class WorldScene extends Phaser.Scene {
         delay: i * 120,
         onComplete: () => text.destroy(),
       });
+    });
+  }
+
+  // Same reused float-and-fade shape as playLootEffect, sent independently
+  // (see WorldRoom's "xpGained" message) so a kill with no drops still gets
+  // feedback — positioned above where the loot stack starts so the two
+  // don't directly overlap when a kill has both.
+  private playXpGainedEffect(amount: number) {
+    const local = this.entities.get(this.room?.sessionId ?? "");
+    if (!local || amount <= 0) return;
+
+    const text = this.add
+      .text(local.rect.x, local.rect.y - HP_BAR_OFFSET_Y - 34, `+${amount} XP`, {
+        fontSize: "16px",
+        fontStyle: "bold",
+        color: "#ffcc33",
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(local.rect.depth + 10);
+    this.tweens.add({
+      targets: text,
+      y: text.y - 24,
+      alpha: 0,
+      duration: 1200,
+      onComplete: () => text.destroy(),
     });
   }
 
@@ -1239,6 +1410,32 @@ export class WorldScene extends Phaser.Scene {
     this.tweens.killTweensOf(this.castFailedText);
     this.castFailedText.setText(reason).setPosition(cam.width / 2, cam.height / 2 - 80).setAlpha(1);
     this.tweens.add({ targets: this.castFailedText, alpha: 0, duration: 800, delay: 500 });
+  }
+
+  // In-game banner (not a blocking alert()) — same reused-object/fade-tween
+  // shape as showCastFailedMessage, just a celebratory beat rather than an
+  // error: bigger text, a pop-in scale tween, and a much longer hold before
+  // it fades, since this only fires once per dungeon run and is worth
+  // actually noticing.
+  private showDungeonClearedBanner() {
+    const cam = this.cameras.main;
+    if (!this.dungeonClearedText) {
+      this.dungeonClearedText = this.add
+        .text(0, 0, "Dungeon Cleared!", {
+          fontSize: "32px",
+          fontStyle: "bold",
+          color: "#ffcc33",
+          backgroundColor: "#000000aa",
+          padding: { x: 18, y: 12 },
+        })
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(UI_DEPTH);
+    }
+    this.tweens.killTweensOf(this.dungeonClearedText);
+    this.dungeonClearedText.setPosition(cam.width / 2, cam.height / 2 - 160).setAlpha(1).setScale(0.7);
+    this.tweens.add({ targets: this.dungeonClearedText, scale: 1, duration: 250, ease: "Back.Out" });
+    this.tweens.add({ targets: this.dungeonClearedText, alpha: 0, duration: 1000, delay: 2500 });
   }
 
   private castSpell(spellId: SpellId) {

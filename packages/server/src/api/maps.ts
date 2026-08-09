@@ -4,8 +4,8 @@ import { asyncRoute } from "./errors.js";
 import { requireAdmin } from "./adminAuth.js";
 import { notifyContentChanged } from "../contentEvents.js";
 import { TileType } from "shared";
-import type { GameMapDTO, GameMapInput, ActiveMapResponse, MapTileDTO, MapTilesUpdateInput } from "shared";
-import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn, MapPortal } from "@prisma/client";
+import type { GameMapDTO, GameMapInput, DungeonObjectiveKind, ActiveMapResponse, MapTileDTO, MapTilesUpdateInput } from "shared";
+import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn, MapPortal, DungeonObjective } from "@prisma/client";
 
 export const mapsRouter = Router();
 
@@ -22,6 +22,7 @@ function toDTO(
     npcSpawns: NpcSpawn[];
     ambientSpawns: MapAmbientSpawn[];
     portals: MapPortal[];
+    dungeonObjectives: DungeonObjective[];
   },
 ): GameMapDTO {
   return {
@@ -62,10 +63,27 @@ function toDTO(
       y: p.y,
       targetMapId: p.targetMapId,
     })),
+    dungeonObjectives: map.dungeonObjectives
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((o) => ({
+        id: o.id,
+        order: o.order,
+        description: o.description,
+        kind: o.kind as DungeonObjectiveKind,
+        monsterTemplateId: o.monsterTemplateId,
+        requiredCount: o.requiredCount,
+      })),
   };
 }
 
-const MAP_INCLUDE = { spawns: true, npcSpawns: true, ambientSpawns: true, portals: true } as const;
+const MAP_INCLUDE = {
+  spawns: true,
+  npcSpawns: true,
+  ambientSpawns: true,
+  portals: true,
+  dungeonObjectives: true,
+} as const;
 
 mapsRouter.get(
   "/",
@@ -189,6 +207,7 @@ mapsRouter.post(
         npcSpawns: { create: body.npcSpawns },
         ambientSpawns: { create: body.ambientSpawns },
         portals: { create: body.portals },
+        dungeonObjectives: { create: body.dungeonObjectives },
       },
       include: MAP_INCLUDE,
     });
@@ -209,6 +228,7 @@ mapsRouter.put(
       await tx.npcSpawn.deleteMany({ where: { mapId: id } });
       await tx.mapAmbientSpawn.deleteMany({ where: { mapId: id } });
       await tx.mapPortal.deleteMany({ where: { mapId: id } });
+      await tx.dungeonObjective.deleteMany({ where: { mapId: id } });
       return tx.gameMap.update({
         where: { id },
         data: {
@@ -225,6 +245,7 @@ mapsRouter.put(
           npcSpawns: { create: body.npcSpawns },
           ambientSpawns: { create: body.ambientSpawns },
           portals: { create: body.portals },
+          dungeonObjectives: { create: body.dungeonObjectives },
         },
         include: MAP_INCLUDE,
       });

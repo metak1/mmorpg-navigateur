@@ -175,9 +175,47 @@
       }
       #admin-tools button:hover { background: #3a2a14; }
 
-      #party-panel { display: flex; flex-direction: column; gap: 6px; }
-      #party-roster { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
-      #party-leave-btn {
+      /* GroupFinder (packages/client/src/ui/GroupFinder.ts) renders into
+         whatever container its caller hands it — the sidebar's Party tab
+         body, or the dungeon prompt's group dock — so these are classes,
+         not ids, since both can exist in the document at once. */
+      .group-finder { display: flex; flex-direction: column; gap: 6px; }
+      .group-finder-tabs { display: flex; gap: 4px; margin-bottom: 4px; }
+      .group-finder-tab {
+        flex: 1 1 auto;
+        padding: 6px 4px;
+        font-size: 12px;
+        border-radius: 6px;
+        border: none;
+        background: #111;
+        color: #888;
+        cursor: pointer;
+      }
+      .group-finder-tab:hover { color: #ccc; }
+      .group-finder-tab.active { background: #2a2a2a; color: #fff; }
+      .group-finder-header {
+        color: #999;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #2a2a2a;
+      }
+      .group-finder-roster, .group-finder-invite-list, .group-finder-applicant-list, .group-finder-browse-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .group-finder-open-toggle {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #999;
+      }
+      .group-finder-leave-btn {
+        align-self: flex-start;
         padding: 6px 12px;
         font-size: 12px;
         border-radius: 4px;
@@ -186,9 +224,27 @@
         color: #ff5555;
         font-weight: bold;
         cursor: pointer;
-        margin-bottom: 4px;
       }
-      #party-leave-btn:hover { background: #3a1414; }
+      .group-finder-leave-btn:hover { background: #3a1414; }
+      .group-finder-create-btn {
+        align-self: flex-start;
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: none;
+        background: #00ff88;
+        color: #111;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      .group-finder-create-btn:hover { background: #33ffa2; }
+      .group-finder-applicant-actions { display: flex; gap: 6px; flex-shrink: 0; }
+      .bag-item button.group-finder-decline-btn {
+        background: #2a1010;
+        color: #ff5555;
+        border: 1px solid #ff5555;
+      }
+      .bag-item button.group-finder-decline-btn:hover { background: #3a1414; }
 
       /* Rarity accents, reused for both equipped slots and bag rows. */
       .rarity-common { border-color: #555 !important; }
@@ -414,6 +470,96 @@
         cursor: pointer;
       }
 
+      /* Draggable, freely-positioned over the game view (see
+         PartyFrames.ts) — position: fixed rather than living inside
+         #game-layout's flex flow, since it must be able to sit on top of
+         the canvas anywhere the player drags it, including outside
+         #game-layout's own box on very small viewports. */
+      #party-frames {
+        position: fixed;
+        z-index: 15;
+        width: 180px;
+        background: rgba(17, 17, 17, 0.75);
+        border: 1px solid #333;
+        border-radius: 8px;
+        overflow: hidden;
+        font-family: sans-serif;
+        user-select: none;
+      }
+      #party-frames-handle {
+        padding: 4px 8px;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #888;
+        background: #1a1a1a;
+        cursor: grab;
+        touch-action: none;
+      }
+      #party-frames-handle:active { cursor: grabbing; }
+      #party-frames-rows { display: flex; flex-direction: column; gap: 4px; padding: 6px; }
+      .party-frame-row { display: flex; flex-direction: column; gap: 2px; }
+      .party-frame-name {
+        font-size: 11px;
+        color: #ccc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .party-frame-row.self .party-frame-name { color: #00ff88; }
+      .party-frame-bar-bg {
+        position: relative;
+        height: 16px;
+        background: #222;
+        border: 1px solid #333;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .party-frame-bar-fill { height: 100%; background: #33dd55; }
+      .party-frame-bar-text {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        color: #fff;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.8);
+      }
+
+      /* Draggable (see draggable.ts), top-right by default — mirrors
+         PartyFrames' top-left default — a live checklist for the current
+         dungeon instance (see WorldRoom's synced dungeonObjectives room
+         state). left/top are set by JS (makeDraggable), not here. */
+      #dungeon-objectives {
+        position: fixed;
+        z-index: 15;
+        width: 220px;
+        background: rgba(17, 17, 17, 0.75);
+        border: 1px solid #333;
+        border-radius: 8px;
+        overflow: hidden;
+        font-family: sans-serif;
+        user-select: none;
+      }
+      #dungeon-objectives-header {
+        padding: 6px 10px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #ffcc33;
+        background: #1a1a1a;
+        cursor: grab;
+        touch-action: none;
+      }
+      #dungeon-objectives-header:active { cursor: grabbing; }
+      #dungeon-objectives-list { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; }
+      .dungeon-objective-row { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: #ddd; }
+      .dungeon-objective-row.completed { color: #666; text-decoration: line-through; }
+      .dungeon-objective-check { color: #00ff88; flex-shrink: 0; }
+      .dungeon-objective-row.completed .dungeon-objective-check { color: #666; }
+      .dungeon-objective-text { line-height: 1.3; }
+
       #dungeon-prompt-overlay {
         position: fixed;
         inset: 0;
@@ -424,6 +570,11 @@
         background: rgba(0, 0, 0, 0.5);
         font-family: sans-serif;
       }
+      /* The dungeon info panel and the docked GroupFinder panel (see
+         DungeonPrompt.show, which hands GroupFinder this dock element) sit
+         side by side inside the one shared backdrop, rather than each
+         popping its own separate darkened overlay. */
+      .dungeon-prompt-row { display: flex; align-items: flex-start; gap: 16px; }
       #dungeon-prompt-panel {
         display: flex;
         flex-direction: column;
@@ -432,37 +583,24 @@
         background: #1a1a1a;
         border: 1px solid #333;
         border-radius: 8px;
-        min-width: 320px;
-        max-width: 420px;
+        width: 320px;
         max-height: 80vh;
         overflow-y: auto;
       }
       #dungeon-prompt-panel h3 { margin: 0; color: #9d4dff; font-size: 16px; }
       .dungeon-prompt-min-level { color: #ffcc66; font-size: 12px; font-weight: 600; }
       .dungeon-prompt-description { margin: 0; color: #ccc; font-size: 13px; line-height: 1.4; }
-      .dungeon-prompt-section-header {
-        color: #999;
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-top: 10px;
-        padding-top: 10px;
-        border-top: 1px solid #2a2a2a;
+      .group-finder-dock {
+        display: flex;
+        flex-direction: column;
+        padding: 20px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        width: 260px;
+        max-height: 80vh;
+        overflow-y: auto;
       }
-      .dungeon-prompt-roster, .dungeon-prompt-invite-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
-      .dungeon-prompt-leave-btn {
-        align-self: flex-start;
-        margin-top: 4px;
-        padding: 6px 12px;
-        font-size: 12px;
-        border-radius: 4px;
-        border: 1px solid #ff5555;
-        background: #2a1010;
-        color: #ff5555;
-        font-weight: bold;
-        cursor: pointer;
-      }
-      .dungeon-prompt-leave-btn:hover { background: #3a1414; }
       .dungeon-prompt-actions {
         display: flex;
         justify-content: flex-end;

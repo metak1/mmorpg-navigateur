@@ -1,5 +1,5 @@
 import { TileType, isoProject, isoUnproject, isoElevationOffset, TILE_COLORS as TILE_COLORS_HEX } from "shared";
-import type { GameMapDTO, GameMapInput, MapTileDTO, MonsterTemplateDTO, NpcTemplateDTO } from "shared";
+import type { GameMapDTO, GameMapInput, MapTileDTO, MonsterTemplateDTO, NpcTemplateDTO, DungeonObjectiveKind } from "shared";
 
 // Fixed viewport size in pixels — the world itself has no size limit, this
 // is just how much of it the editor shows at once. `zoom` (canvas pixels
@@ -12,6 +12,7 @@ const MAX_ZOOM = 2;
 const ZOOM_STEP_FACTOR = 1.2;
 const PAN_STEP_TILES = 10;
 const AMBIENT_SLOT_COUNT = 4;
+const OBJECTIVE_SLOT_COUNT = 6;
 // 125*125=15,625 cells — under the server's 128*128=16,384 range cap
 // (packages/server/src/api/maps.ts) with margin, computed to actually
 // cover the naive bounding box at MIN_ZOOM (which reaches ~150x150).
@@ -139,6 +140,13 @@ export function renderMapEditor(
       col: Math.floor(p.x / initialMap.tileSize),
       row: Math.floor(p.y / initialMap.tileSize),
       targetMapId: p.targetMapId,
+    })),
+    // Already order-sorted by the API (see server/src/api/maps.ts's toDTO).
+    dungeonObjectives: initialMap.dungeonObjectives.map((o) => ({
+      description: o.description,
+      kind: o.kind,
+      monsterTemplateId: o.monsterTemplateId,
+      requiredCount: o.requiredCount,
     })),
   };
 
@@ -470,6 +478,89 @@ export function renderMapEditor(
     row.append(select, weight);
     settingsSection.appendChild(row);
     ambientRows.push({ select, weight });
+  }
+
+  // --- Objectives: only meaningful for a dungeon map (see isDungeon above)
+  // — completing every defined objective clears the dungeon instead of the
+  // old hardcoded "any boss kill clears it" rule (see WorldRoom.
+  // updateDungeonObjectives). Leaving every row blank (kind "-- none --")
+  // keeps that old behavior unchanged, same as leaving an ambient-spawn or
+  // drop slot empty elsewhere in this editor.
+  const objectivesSection = addPaletteTab("objectives", "Objectives");
+  const objectivesTabBtn = paletteTabButtons.get("objectives")!;
+  const updateObjectivesTabVisibility = () => {
+    objectivesTabBtn.style.display = state.isDungeon ? "" : "none";
+  };
+  updateObjectivesTabVisibility();
+  isDungeonInput.addEventListener("change", updateObjectivesTabVisibility);
+
+  const objectivesHint = document.createElement("p");
+  objectivesHint.className = "palette-empty";
+  objectivesHint.textContent =
+    'Completing every objective below clears the dungeon (spawns the exit portal). Leave a row\'s kind as "-- none --" to skip it.';
+  objectivesSection.appendChild(objectivesHint);
+
+  const OBJECTIVE_KIND_OPTIONS: Array<{ value: DungeonObjectiveKind | ""; label: string }> = [
+    { value: "", label: "-- none --" },
+    { value: "killBoss", label: "Kill the boss" },
+    { value: "killAllMonsters", label: "Kill every monster" },
+    { value: "killCount", label: "Kill a number of a specific monster" },
+  ];
+
+  const objectiveRows: Array<{
+    description: HTMLInputElement;
+    kind: HTMLSelectElement;
+    monsterSelect: HTMLSelectElement;
+    requiredCount: HTMLInputElement;
+  }> = [];
+  for (let i = 0; i < OBJECTIVE_SLOT_COUNT; i++) {
+    const objective = state.dungeonObjectives[i];
+    const row = document.createElement("div");
+    row.className = "palette-objective-row";
+
+    const description = document.createElement("input");
+    description.type = "text";
+    description.placeholder = "Description (e.g. Defeat the Bone Golem)";
+    description.value = objective?.description ?? "";
+
+    const kind = document.createElement("select");
+    for (const opt of OBJECTIVE_KIND_OPTIONS) {
+      const el = document.createElement("option");
+      el.value = opt.value;
+      el.textContent = opt.label;
+      kind.appendChild(el);
+    }
+    kind.value = objective?.kind ?? "";
+
+    const monsterSelect = document.createElement("select");
+    for (const opt of monsterOptionsWithNone) {
+      const el = document.createElement("option");
+      el.value = opt.value;
+      el.textContent = opt.label;
+      monsterSelect.appendChild(el);
+    }
+    monsterSelect.value = objective?.monsterTemplateId ?? "";
+
+    const requiredCount = document.createElement("input");
+    requiredCount.type = "number";
+    requiredCount.min = "1";
+    requiredCount.step = "1";
+    requiredCount.value = String(objective?.requiredCount ?? 1);
+
+    // Only killCount needs a specific monster + a target count — killBoss
+    // is always "the" boss and killAllMonsters' target is computed
+    // server-side from the dungeon's own hand-placed monster count.
+    const updateRowVisibility = () => {
+      const isKillCount = kind.value === "killCount";
+      monsterSelect.style.display = isKillCount ? "" : "none";
+      requiredCount.style.display = isKillCount ? "" : "none";
+    };
+    updateRowVisibility();
+    kind.addEventListener("change", updateRowVisibility);
+
+    row.append(description, kind, monsterSelect, requiredCount);
+    objectivesSection.appendChild(row);
+    objectiveRows.push({ description, kind, monsterSelect, requiredCount });
   }
 
   showPaletteTab("tiles");
@@ -968,6 +1059,18 @@ export function renderMapEditor(
     const ambientSpawns = ambientRows
       .filter((r) => r.select.value)
       .map((r) => ({ monsterTemplateId: r.select.value, weight: Number(r.weight.value) || 1 }));
+    const dungeonObjectives = objectiveRows
+      .filter((r) => r.kind.value)
+      .map((r, i) => {
+        const kind = r.kind.value as DungeonObjectiveKind;
+        return {
+          order: i,
+          description: r.description.value,
+          kind,
+          monsterTemplateId: kind === "killCount" ? r.monsterSelect.value || null : null,
+          requiredCount: kind === "killCount" ? Math.max(1, Math.round(Number(r.requiredCount.value)) || 1) : null,
+        };
+      });
 
     const input: GameMapInput = {
       name: state.name,
@@ -996,6 +1099,7 @@ export function renderMapEditor(
         x: p.col * tileSize + tileSize / 2,
         y: p.row * tileSize + tileSize / 2,
       })),
+      dungeonObjectives,
     };
     const tiles: MapTileDTO[] = [...dirtyTiles.entries()].map(([key, cell]) => {
       const [col, row] = key.split(",").map(Number);

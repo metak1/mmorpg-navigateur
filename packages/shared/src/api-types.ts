@@ -238,6 +238,20 @@ export interface MapPortalDTO {
 
 export type MapPortalInput = Omit<MapPortalDTO, "id">;
 
+export type DungeonObjectiveKind = "killBoss" | "killAllMonsters" | "killCount";
+
+export interface DungeonObjectiveDTO {
+  id: string;
+  order: number;
+  description: string;
+  kind: DungeonObjectiveKind;
+  // killCount only.
+  monsterTemplateId: string | null;
+  requiredCount: number | null;
+}
+
+export type DungeonObjectiveInput = Omit<DungeonObjectiveDTO, "id">;
+
 export interface GameMapDTO {
   id: string;
   name: string;
@@ -261,13 +275,18 @@ export interface GameMapDTO {
   npcSpawns: NpcSpawnDTO[];
   ambientSpawns: AmbientSpawnDTO[];
   portals: MapPortalDTO[];
+  dungeonObjectives: DungeonObjectiveDTO[];
 }
 
-export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns" | "ambientSpawns" | "portals"> & {
+export type GameMapInput = Omit<
+  GameMapDTO,
+  "id" | "isActive" | "spawns" | "npcSpawns" | "ambientSpawns" | "portals" | "dungeonObjectives"
+> & {
   spawns: MonsterSpawnInput[];
   npcSpawns: NpcSpawnInput[];
   ambientSpawns: AmbientSpawnInput[];
   portals: MapPortalInput[];
+  dungeonObjectives: DungeonObjectiveInput[];
 };
 
 // The active map's terrain is not shipped in this response — it's infinite,

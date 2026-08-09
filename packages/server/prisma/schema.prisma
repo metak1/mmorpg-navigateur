@@ -89,6 +89,7 @@ model MonsterTemplate {
   quests             Quest[]
   drops              MonsterDrop[]
   ambientSpawnOf     MapAmbientSpawn[]
+  dungeonObjectives  DungeonObjective[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -226,8 +227,41 @@ model GameMap {
   ambientSpawns      MapAmbientSpawn[]
   portals            MapPortal[] @relation("PortalSource")
   portalTargetOf     MapPortal[] @relation("PortalTarget")
+  dungeonObjectives  DungeonObjective[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+enum DungeonObjectiveKind {
+  killBoss
+  killAllMonsters
+  killCount
+}
+
+// One entry in an ordered checklist of goals a dungeon instance tracks live
+// (see WorldRoom's synced dungeonObjectives room state) — completing every
+// objective clears the dungeon (broadcasts dungeonCleared, spawns the exit
+// portal), replacing the old hardcoded "any boss kill clears it" rule for
+// any map that defines at least one (see WorldRoom.updateDungeonObjectives;
+// a map with none keeps the old boss-only behavior unchanged). Only
+// meaningful when the owning map's isDungeon is true.
+model DungeonObjective {
+  id                String               @id @default(cuid())
+  mapId             String
+  map               GameMap              @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  // Display/checklist order — purely presentational, doesn't affect
+  // completion (every objective must complete regardless of order).
+  order             Int                  @default(0)
+  description       String
+  kind              DungeonObjectiveKind
+  // killCount only — which monster template counts toward it.
+  monsterTemplateId String?
+  monsterTemplate   MonsterTemplate?     @relation(fields: [monsterTemplateId], references: [id])
+  // killCount only (admin-set, must be >=1). killBoss is always 1 and
+  // killAllMonsters is always the dungeon's total hand-placed monster
+  // count — both computed at room creation instead, not stored here (see
+  // WorldRoom.onCreate).
+  requiredCount     Int?
 }
 
 // A portal placed on one map that leads to another. A dungeon's own return

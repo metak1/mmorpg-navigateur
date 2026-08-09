@@ -7,7 +7,10 @@ import {
   type TalentTemplateDTO,
   type LearnedTalentView,
   type PartyStateMessage,
+  type PartyApplicantView,
+  type OpenPartyView,
 } from "shared";
+import { groupFinder, type GroupFinderHandlers } from "./GroupFinder.js";
 
 type PanelKey = "chat" | "inventory" | "quests" | "stats" | "talents" | "party";
 
@@ -94,10 +97,10 @@ export interface OnlinePlayerView {
   name: string;
 }
 
-export interface PartyHandlers {
-  onInvite: (targetSessionId: string) => void;
-  onLeave: () => void;
-}
+// Re-exported under the sidebar's own name for callers that only know about
+// the Party tab — it's the exact same handler shape GroupFinder itself
+// uses, since the sidebar just docks that one shared component in.
+export type PartyHandlers = GroupFinderHandlers;
 
 // defs is the class's full tree definition (content, fetched once via REST —
 // see net/api.ts's fetchTalents), while points/learned are the private,
@@ -129,7 +132,7 @@ const PANEL_PLACEHOLDER: Record<PanelKey, string> = {
   party: "Not in a game yet",
 };
 
-const EMPTY_PARTY_STATE: PartyStateMessage = { leaderSessionId: null, members: [] };
+const EMPTY_PARTY_STATE: PartyStateMessage = { leaderSessionId: null, members: [], open: false };
 
 export interface QuestLogEntry {
   questId: string;
@@ -195,6 +198,9 @@ export class Sidebar {
   private mySessionId = "";
   private party: PartyStateMessage = EMPTY_PARTY_STATE;
   private onlinePlayers: OnlinePlayerView[] = [];
+  private applicants: PartyApplicantView[] = [];
+  private openParties: OpenPartyView[] = [];
+  private myPendingApplications: ReadonlySet<string> = new Set();
   private partyHandlers: PartyHandlers | null = null;
 
   constructor() {
@@ -293,12 +299,38 @@ export class Sidebar {
     if (this.currentPanel === "party") this.render();
   }
 
+  // Leader-only in practice (see WorldRoom.sendPartyApplications) — empty
+  // for everyone else, so this just quietly renders nothing extra for them.
+  setApplicants(applicants: PartyApplicantView[]) {
+    this.applicants = applicants;
+    if (this.currentPanel === "party") this.render();
+  }
+
+  // The server-wide browsable list of open, non-full parties — kept current
+  // even while the Party tab isn't active for the same reason
+  // setOnlinePlayers is.
+  setOpenParties(parties: OpenPartyView[]) {
+    this.openParties = parties;
+    if (this.currentPanel === "party") this.render();
+  }
+
+  setMyPendingApplications(pending: ReadonlySet<string>) {
+    this.myPendingApplications = pending;
+    if (this.currentPanel === "party") this.render();
+  }
+
   setPartyHandlers(handlers: PartyHandlers) {
     this.partyHandlers = handlers;
   }
 
   private render() {
     this.bodyEl.innerHTML = "";
+    // GroupFinder tracks a single container at a time (see its own hide()
+    // doc) — clearing bodyEl above already wipes it visually whenever a
+    // non-party panel renders, but without this it would still think that
+    // (now-repurposed) element is live and render stale party updates into
+    // whatever panel replaced it.
+    if (this.currentPanel !== "party") groupFinder.hide();
 
     if (this.currentPanel === "quests" && (this.quests.length > 0 || this.completedQuests.length > 0)) {
       this.renderQuests();
@@ -317,7 +349,27 @@ export class Sidebar {
       return;
     }
     if (this.currentPanel === "party" && this.mySessionId) {
-      this.renderParty();
+      const handlers: PartyHandlers = this.partyHandlers ?? {
+        onCreateGroup: () => {},
+        onInvite: () => {},
+        onLeave: () => {},
+        onSetOpen: () => {},
+        onApply: () => {},
+        onWithdrawApplication: () => {},
+        onRespondApplication: () => {},
+      };
+      groupFinder.show(
+        this.bodyEl,
+        {
+          party: this.party,
+          onlinePlayers: this.onlinePlayers,
+          mySessionId: this.mySessionId,
+          applicants: this.applicants,
+          openParties: this.openParties,
+          myPendingApplications: this.myPendingApplications,
+        },
+        handlers,
+      );
       return;
     }
 
@@ -677,80 +729,6 @@ export class Sidebar {
     });
   }
 
-  private renderParty() {
-    const wrapper = document.createElement("div");
-    wrapper.id = "party-panel";
-
-    if (this.party.members.length > 0) {
-      const header = document.createElement("div");
-      header.id = "bag-header";
-      header.textContent = "Your Party";
-      wrapper.appendChild(header);
-
-      const roster = document.createElement("div");
-      roster.id = "party-roster";
-      for (const member of this.party.members) {
-        const row = document.createElement("div");
-        row.className = "bag-item";
-        const name = document.createElement("div");
-        name.className = "bag-item-name";
-        const isLeader = member.sessionId === this.party.leaderSessionId;
-        name.textContent = `${isLeader ? "★ " : ""}${member.name}`;
-        const desc = document.createElement("div");
-        desc.className = "bag-item-desc";
-        desc.textContent = `Lvl ${member.level} ${member.className}`;
-        row.append(name, desc);
-        roster.appendChild(row);
-      }
-      wrapper.appendChild(roster);
-
-      const leaveBtn = document.createElement("button");
-      leaveBtn.id = "party-leave-btn";
-      leaveBtn.textContent = "Leave Party";
-      leaveBtn.addEventListener("click", () => this.partyHandlers?.onLeave());
-      wrapper.appendChild(leaveBtn);
-    } else {
-      const empty = document.createElement("div");
-      empty.className = "bag-empty";
-      empty.textContent = "Not in a party";
-      wrapper.appendChild(empty);
-    }
-
-    const listHeader = document.createElement("div");
-    listHeader.id = "bag-header";
-    listHeader.textContent = "Online Players";
-    wrapper.appendChild(listHeader);
-
-    const inPartySessionIds = new Set(this.party.members.map((m) => m.sessionId));
-    const invitable = this.onlinePlayers.filter((p) => p.sessionId !== this.mySessionId);
-
-    const list = document.createElement("div");
-    list.id = "bag-list";
-    if (invitable.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "bag-empty";
-      empty.textContent = "No one else online";
-      list.appendChild(empty);
-    }
-    for (const player of invitable) {
-      const row = document.createElement("div");
-      row.className = "bag-item";
-      const name = document.createElement("div");
-      name.className = "bag-item-name";
-      name.textContent = player.name;
-      row.appendChild(name);
-      if (!inPartySessionIds.has(player.sessionId)) {
-        const button = document.createElement("button");
-        button.textContent = "Invite";
-        button.addEventListener("click", () => this.partyHandlers?.onInvite(player.sessionId));
-        row.appendChild(button);
-      }
-      list.appendChild(row);
-    }
-    wrapper.appendChild(list);
-
-    this.bodyEl.appendChild(wrapper);
-  }
 }
 
 export const sidebar = new Sidebar();

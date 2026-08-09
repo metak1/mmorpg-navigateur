@@ -41,6 +41,7 @@ export async function renderMapsPage(container: HTMLElement) {
         npcSpawns: [],
         ambientSpawns: [],
         portals: [],
+        dungeonObjectives: [],
       });
     });
 

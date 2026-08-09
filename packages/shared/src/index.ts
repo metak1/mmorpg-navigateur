@@ -3,6 +3,7 @@ export * from "./schema/Monster.js";
 export * from "./schema/Projectile.js";
 export * from "./schema/Npc.js";
 export * from "./schema/Portal.js";
+export * from "./schema/DungeonObjectiveState.js";
 export * from "./schema/QuestProgress.js";
 export * from "./schema/RoomState.js";
 export * from "./messages.js";

@@ -224,6 +224,14 @@ export interface LootDroppedMessage {
   drops: Array<{ itemId: string; name: string; color: number; rarity: ItemRarity; quantity: number }>;
 }
 
+// Sent to the killing player only, once per monster death — independent of
+// LootDroppedMessage (which is skipped entirely when nothing rolls), so a
+// kill with no drops still gets XP feedback. Purely a client-side floating-
+// text cue; grantXp applies the actual stat change separately.
+export interface XpGainedMessage {
+  amount: number;
+}
+
 // --- Party system ---
 // Lives entirely as extra state/messages on WorldRoom rather than a
 // separate service — every overworld player is already colocated in the
@@ -232,6 +240,14 @@ export interface LootDroppedMessage {
 // each other.
 
 export const MAX_PARTY_SIZE = 4;
+
+// Client -> server: explicitly forms a new party of just the sender (as
+// leader), rather than leaving a party to spring into existence implicitly
+// the first time an invite is accepted (see RespondPartyInviteMessage's
+// server handling). Lets a player commit to "I'm forming a group" — and see
+// themselves listed as one — before anyone else has joined. A no-op if the
+// sender is already in a party.
+export interface CreatePartyMessage {}
 
 export interface InvitePartyMessage {
   targetSessionId: string;
@@ -267,12 +283,83 @@ export interface PartyMemberView {
 
 // Pushed to every current member whenever the roster changes (invite
 // accepted, member left, party disbanded) — an empty members array means
-// "you are not in a party." leaderSessionId is currently cosmetic (no
-// leader-only permissions are enforced yet — see the party system's scope
-// notes) but is included since a roster reads oddly with no leader shown.
+// "you are not in a party." leaderSessionId is used both cosmetically (a
+// star in the roster) and functionally now — only the leader may invite,
+// toggle open/closed, or accept/decline applications.
 export interface PartyStateMessage {
   leaderSessionId: string | null;
   members: PartyMemberView[];
+  // Whether this party currently shows up in everyone's browsable
+  // "recruiting" list (see OpenPartiesStateMessage) and accepts unsolicited
+  // applications — leader-controlled via SetPartyOpenMessage. Always false
+  // on an empty (no-party) state.
+  open: boolean;
+}
+
+// --- Party applications ---
+// A second way to end up in a group besides a direct invite: the leader
+// marks their party "open," it shows up in everyone's browsable list, and
+// anyone not already in a party can apply — the leader then accepts or
+// declines each applicant individually, same shape as the existing invite
+// accept/decline flow just initiated from the other side.
+
+// Client -> server: leader-only, toggles whether the party is open (see
+// PartyStateMessage.open).
+export interface SetPartyOpenMessage {
+  open: boolean;
+}
+
+// Client -> server: apply to join a specific open party (seen via
+// OpenPartiesStateMessage). Rejected (via PartyActionFailedMessage) if the
+// sender is already in a party, or the target party isn't open/is full.
+export interface ApplyToPartyMessage {
+  partyId: string;
+}
+
+// Client -> server: cancels a previously-sent application before the
+// leader has responded to it.
+export interface WithdrawPartyApplicationMessage {
+  partyId: string;
+}
+
+// Client -> server: leader-only, accepts or declines one pending applicant.
+export interface RespondPartyApplicationMessage {
+  sessionId: string;
+  accept: boolean;
+}
+
+export interface PartyApplicantView {
+  sessionId: string;
+  name: string;
+}
+
+// Pushed to the party leader only (applications are private to them),
+// wholesale, whenever the pending list changes — apply, withdraw, accept,
+// decline, or an applicant disconnecting.
+export interface PartyApplicationsStateMessage {
+  applicants: PartyApplicantView[];
+}
+
+// Sent to the applicant only, when the leader declines (or the party fills
+// up / closes before they respond) — lets the client clear its own
+// "applied" UI state for that specific party. Accept has no equivalent
+// dedicated message since the resulting PartyStateMessage already covers it
+// (the applicant is now simply a member).
+export interface PartyApplicationDeclinedMessage {
+  partyId: string;
+}
+
+export interface OpenPartyView {
+  partyId: string;
+  leaderName: string;
+  memberCount: number;
+}
+
+// Pushed to every connected client (not just party members — this is the
+// browsable list everyone sees) whenever the set of open, non-full parties
+// changes.
+export interface OpenPartiesStateMessage {
+  parties: OpenPartyView[];
 }
 
 // --- Portals / dungeons ---

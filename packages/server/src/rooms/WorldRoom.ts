@@ -21,6 +21,7 @@ import {
   Npc,
   Portal,
   QuestProgress,
+  DungeonObjectiveState,
   RoomState,
   WORLD_ROOM,
   DUNGEON_ROOM,
@@ -65,6 +66,7 @@ import {
   type EquipActionFailedMessage,
   type InventoryStateMessage,
   type LootDroppedMessage,
+  type XpGainedMessage,
   type CompletedQuestsStateMessage,
   type LearnTalentMessage,
   type TalentActionFailedMessage,
@@ -72,6 +74,7 @@ import {
   type AdminSetLevelMessage,
   type TalentSpellParam,
   type TalentMechanicFlag,
+  type CreatePartyMessage,
   type InvitePartyMessage,
   type RespondPartyInviteMessage,
   type LeavePartyMessage,
@@ -79,12 +82,22 @@ import {
   type PartyInviteReceivedMessage,
   type PartyMemberView,
   type PartyStateMessage,
+  type SetPartyOpenMessage,
+  type ApplyToPartyMessage,
+  type WithdrawPartyApplicationMessage,
+  type RespondPartyApplicationMessage,
+  type PartyApplicantView,
+  type PartyApplicationsStateMessage,
+  type PartyApplicationDeclinedMessage,
+  type OpenPartyView,
+  type OpenPartiesStateMessage,
   type UsePortalMessage,
   type PortalFailedMessage,
   type PortalGrantedMessage,
   type DungeonClearedMessage,
   type DungeonPromptMessage,
   type EnterDungeonMessage,
+  type DungeonObjectiveKind,
   PORTAL_INTERACT_RANGE,
   type EquipmentSlot,
   type ItemSlotType,
@@ -165,6 +178,14 @@ interface MonsterCastRuntime {
 interface Party {
   leaderSessionId: string;
   memberSessionIds: string[];
+  // Leader-controlled — see SetPartyOpenMessage. Gates both visibility in
+  // the browsable open-parties list (computeOpenParties) and whether
+  // applyToParty accepts new applications at all.
+  open: boolean;
+  // Pending join requests from players who applied via an open listing,
+  // awaiting the leader's accept/decline — see handleApplyToParty /
+  // handleRespondPartyApplication. Private to the leader (sendPartyApplications).
+  applicantSessionIds: string[];
 }
 
 interface NpcRuntime {
@@ -269,11 +290,19 @@ export class WorldRoom extends Room<RoomState> {
   private isDungeonInstance = false;
   private allowedCharacterIds?: Set<string>;
   // See WorldRoomOptions.returnMapId — where a dungeon's dynamically-spawned
-  // exit portal (see damageMonster's dungeonCleared branch) leads.
+  // exit portal (see clearDungeon) leads.
   private returnMapId?: string;
-  // Guards against spawning a second exit portal if a dungeon has more than
-  // one boss-flagged monster — the dungeon only needs to be "cleared" once.
-  private exitPortalSpawned = false;
+  // Guards clearDungeon against firing more than once — e.g. a dungeon with
+  // no authored objectives can still have more than one boss-flagged
+  // monster, and one with objectives could satisfy its last one on a kill
+  // that also completes an unrelated killAllMonsters objective in the same
+  // pass (see updateDungeonObjectives).
+  private dungeonAlreadyCleared = false;
+  // Server-only per-objective data backing this.state.dungeonObjectives
+  // (synced schema only carries what the client needs to render a
+  // checklist — see DungeonObjectiveState) — populated once at onCreate,
+  // keyed by DungeonObjectiveState.id.
+  private dungeonObjectiveMeta = new Map<string, { kind: DungeonObjectiveKind; monsterTemplateId?: string }>();
   // In-memory only — parties are session-scoped, not persisted, and every
   // overworld player already shares this one room instance, so no cross-
   // room presence infrastructure is needed for them to find each other.
@@ -389,6 +418,34 @@ export class WorldRoom extends Room<RoomState> {
       this.spawnMonster(`monster-${index}`, { x: spawn.x, y: spawn.y }, spawn.monsterTemplate, spawn.isBoss);
     });
 
+    // Only meaningful for a dungeon instance — the plain overworld room has
+    // no "cleared" concept. A map with no DungeonObjective rows leaves
+    // state.dungeonObjectives empty, which is exactly what
+    // updateDungeonObjectives treats as "fall back to the old hardcoded
+    // any-boss-kill-clears-it rule."
+    if (this.isDungeonInstance) {
+      const objectiveRows = await prisma.dungeonObjective.findMany({ where: { mapId: map.id }, orderBy: { order: "asc" } });
+      for (const row of objectiveRows) {
+        const objective = new DungeonObjectiveState();
+        objective.id = row.id;
+        objective.description = row.description;
+        objective.progress = 0;
+        objective.completed = false;
+        // killBoss always needs exactly one boss kill; killAllMonsters'
+        // target is this instance's own hand-placed monster count (there's
+        // no ambient spawning inside a dungeon instance, so spawnRows.length
+        // is the total that will ever exist); killCount uses whatever the
+        // admin set.
+        objective.requiredCount =
+          row.kind === "killBoss" ? 1 : row.kind === "killAllMonsters" ? spawnRows.length : (row.requiredCount ?? 1);
+        this.state.dungeonObjectives.push(objective);
+        this.dungeonObjectiveMeta.set(row.id, {
+          kind: row.kind as DungeonObjectiveKind,
+          monsterTemplateId: row.monsterTemplateId ?? undefined,
+        });
+      }
+    }
+
     const npcSpawnRows = await prisma.npcSpawn.findMany({
       where: { mapId: map.id },
       include: { npcTemplate: true },
@@ -421,11 +478,20 @@ export class WorldRoom extends Room<RoomState> {
     this.onMessage("unequipItem", (client, message: UnequipItemMessage) => void this.handleUnequipItem(client, message));
     this.onMessage("learnTalent", (client, message: LearnTalentMessage) => void this.handleLearnTalent(client, message));
     this.onMessage("adminSetLevel", (client, message: AdminSetLevelMessage) => void this.handleAdminSetLevel(client, message));
+    this.onMessage("createParty", (client, _message: CreatePartyMessage) => this.handleCreateParty(client));
     this.onMessage("inviteParty", (client, message: InvitePartyMessage) => this.handleInviteParty(client, message));
     this.onMessage("respondPartyInvite", (client, message: RespondPartyInviteMessage) =>
       this.handleRespondPartyInvite(client, message),
     );
     this.onMessage("leaveParty", (client: Client, _message: LeavePartyMessage) => this.handleLeaveParty(client));
+    this.onMessage("setPartyOpen", (client, message: SetPartyOpenMessage) => this.handleSetPartyOpen(client, message));
+    this.onMessage("applyToParty", (client, message: ApplyToPartyMessage) => this.handleApplyToParty(client, message));
+    this.onMessage("withdrawPartyApplication", (client, message: WithdrawPartyApplicationMessage) =>
+      this.handleWithdrawPartyApplication(client, message),
+    );
+    this.onMessage("respondPartyApplication", (client, message: RespondPartyApplicationMessage) =>
+      this.handleRespondPartyApplication(client, message),
+    );
     this.onMessage("usePortal", (client, message: UsePortalMessage) => void this.handleUsePortal(client, message));
     this.onMessage("enterDungeon", (client, message: EnterDungeonMessage) => void this.handleEnterDungeon(client, message));
 
@@ -1112,11 +1178,11 @@ export class WorldRoom extends Room<RoomState> {
           void this.grantXp(casterSessionId, runtime.template.xpReward);
           void this.trackMonsterKill(casterSessionId, runtime.template.id);
           void this.grantDrops(casterSessionId, runtime.template);
+          this.clients
+            .getById(casterSessionId)
+            ?.send("xpGained", { amount: runtime.template.xpReward } satisfies XpGainedMessage);
         }
-        if (runtime.isBoss) {
-          this.broadcast("dungeonCleared", {} satisfies DungeonClearedMessage);
-          this.spawnExitPortal(monster.x, monster.y);
-        }
+        this.updateDungeonObjectives(runtime, monster);
         // No respawn for the lifetime of a dungeon instance — a fresh
         // instance (with fresh monsters) is created the next time a party
         // enters, rather than trash mobs ever coming back mid-run.
@@ -1128,6 +1194,49 @@ export class WorldRoom extends Room<RoomState> {
         }
       }
     }
+  }
+
+  // Called once per monster kill, from damageMonster. A dungeon whose map
+  // defines no DungeonObjective rows keeps the old, simpler rule (any boss
+  // kill clears it); one that does define at least one only clears once
+  // every objective on it is completed, checked fresh after every kill
+  // since a single kill can advance more than one objective at once (e.g.
+  // the boss itself also counting toward a killAllMonsters tally).
+  private updateDungeonObjectives(runtime: MonsterRuntime, monster: Monster) {
+    if (!this.isDungeonInstance || this.dungeonAlreadyCleared) return;
+
+    if (this.state.dungeonObjectives.length === 0) {
+      if (runtime.isBoss) this.clearDungeon(monster.x, monster.y);
+      return;
+    }
+
+    for (const objective of this.state.dungeonObjectives) {
+      if (objective.completed) continue;
+      const meta = this.dungeonObjectiveMeta.get(objective.id);
+      if (!meta) continue;
+
+      if (meta.kind === "killBoss") {
+        if (!runtime.isBoss) continue;
+        objective.progress = 1;
+        objective.completed = true;
+      } else if (meta.kind === "killAllMonsters") {
+        objective.progress = Math.min(objective.progress + 1, objective.requiredCount);
+        if (objective.progress >= objective.requiredCount) objective.completed = true;
+      } else if (meta.kind === "killCount") {
+        if (meta.monsterTemplateId !== runtime.template.id) continue;
+        objective.progress = Math.min(objective.progress + 1, objective.requiredCount);
+        if (objective.progress >= objective.requiredCount) objective.completed = true;
+      }
+    }
+
+    if (this.state.dungeonObjectives.every((o) => o.completed)) this.clearDungeon(monster.x, monster.y);
+  }
+
+  private clearDungeon(x: number, y: number) {
+    if (this.dungeonAlreadyCleared) return;
+    this.dungeonAlreadyCleared = true;
+    this.broadcast("dungeonCleared", {} satisfies DungeonClearedMessage);
+    this.spawnExitPortal(x, y);
   }
 
   // Applies gained XP (handling multi-level-ups) and, only when a level-up
@@ -1195,6 +1304,22 @@ export class WorldRoom extends Room<RoomState> {
   // no DB persistence, a party dissolves when the room does or when
   // everyone leaves it.
 
+  // Explicit counterpart to the implicit party creation that already
+  // happens in handleRespondPartyInvite (an accepted invite forms a party
+  // on the spot if the inviter didn't have one yet) — this just lets a
+  // player commit to "I'm forming a group" and see themselves listed as its
+  // sole member/leader before inviting anyone, rather than only ever seeing
+  // a party once someone else has accepted.
+  private handleCreateParty(client: Client) {
+    const sessionId = client.sessionId;
+    if (this.partyIdBySession.has(sessionId)) return;
+
+    const partyId = `party-${this.partySeq++}`;
+    this.parties.set(partyId, { leaderSessionId: sessionId, memberSessionIds: [sessionId], open: false, applicantSessionIds: [] });
+    this.partyIdBySession.set(sessionId, partyId);
+    this.broadcastPartyState(partyId);
+  }
+
   private handleInviteParty(client: Client, message: InvitePartyMessage) {
     const sessionId = client.sessionId;
     const inviter = this.state.players.get(sessionId);
@@ -1239,7 +1364,12 @@ export class WorldRoom extends Room<RoomState> {
       // Inviter wasn't in a party yet either — this invite forms a brand
       // new one with them as leader.
       partyId = `party-${this.partySeq++}`;
-      this.parties.set(partyId, { leaderSessionId: message.fromSessionId, memberSessionIds: [message.fromSessionId] });
+      this.parties.set(partyId, {
+        leaderSessionId: message.fromSessionId,
+        memberSessionIds: [message.fromSessionId],
+        open: false,
+        applicantSessionIds: [],
+      });
       this.partyIdBySession.set(message.fromSessionId, partyId);
     }
     const party = this.parties.get(partyId);
@@ -1269,16 +1399,21 @@ export class WorldRoom extends Room<RoomState> {
     this.partyIdBySession.delete(sessionId);
     this.clients
       .getById(sessionId)
-      ?.send("partyState", { leaderSessionId: null, members: [] } satisfies PartyStateMessage);
+      ?.send("partyState", { leaderSessionId: null, members: [], open: false } satisfies PartyStateMessage);
 
     if (party.memberSessionIds.length === 0) {
       this.parties.delete(partyId);
+      this.broadcastOpenParties();
       return;
     }
     if (party.leaderSessionId === sessionId) {
       party.leaderSessionId = party.memberSessionIds[0];
+      // Applications were only ever visible to the old leader — the new one
+      // needs the current pending list pushed too, not just the roster.
+      this.sendPartyApplications(partyId);
     }
     this.broadcastPartyState(partyId);
+    this.broadcastOpenParties();
   }
 
   private broadcastPartyState(partyId: string) {
@@ -1288,10 +1423,122 @@ export class WorldRoom extends Room<RoomState> {
       const player = this.state.players.get(sessionId);
       return { sessionId, name: player?.name ?? "?", level: player?.level ?? 1, className: player?.className ?? "?" };
     });
-    const message: PartyStateMessage = { leaderSessionId: party.leaderSessionId, members };
+    const message: PartyStateMessage = { leaderSessionId: party.leaderSessionId, members, open: party.open };
     for (const memberSessionId of party.memberSessionIds) {
       this.clients.getById(memberSessionId)?.send("partyState", message);
     }
+  }
+
+  // --- Party applications (open/browse/apply, alongside direct invites) ---
+
+  private handleSetPartyOpen(client: Client, message: SetPartyOpenMessage) {
+    const sessionId = client.sessionId;
+    const partyId = this.partyIdBySession.get(sessionId);
+    if (!partyId) return;
+    const party = this.parties.get(partyId);
+    if (!party || party.leaderSessionId !== sessionId) return;
+
+    party.open = message.open;
+    this.broadcastPartyState(partyId);
+    this.broadcastOpenParties();
+  }
+
+  private handleApplyToParty(client: Client, message: ApplyToPartyMessage) {
+    const sessionId = client.sessionId;
+    if (this.partyIdBySession.has(sessionId)) {
+      client.send("partyActionFailed", { reason: "Leave your current group first." } satisfies PartyActionFailedMessage);
+      return;
+    }
+    const party = this.parties.get(message.partyId);
+    if (!party || !party.open || party.memberSessionIds.length >= MAX_PARTY_SIZE) {
+      client.send("partyActionFailed", { reason: "That group isn't accepting applications." } satisfies PartyActionFailedMessage);
+      return;
+    }
+    if (!party.applicantSessionIds.includes(sessionId)) {
+      party.applicantSessionIds.push(sessionId);
+      this.sendPartyApplications(message.partyId);
+    }
+  }
+
+  private handleWithdrawPartyApplication(client: Client, message: WithdrawPartyApplicationMessage) {
+    const party = this.parties.get(message.partyId);
+    if (!party) return;
+    const index = party.applicantSessionIds.indexOf(client.sessionId);
+    if (index === -1) return;
+    party.applicantSessionIds.splice(index, 1);
+    this.sendPartyApplications(message.partyId);
+  }
+
+  private handleRespondPartyApplication(client: Client, message: RespondPartyApplicationMessage) {
+    const sessionId = client.sessionId;
+    const partyId = this.partyIdBySession.get(sessionId);
+    if (!partyId) return;
+    const party = this.parties.get(partyId);
+    if (!party || party.leaderSessionId !== sessionId) return;
+
+    const index = party.applicantSessionIds.indexOf(message.sessionId);
+    if (index === -1) return;
+    party.applicantSessionIds.splice(index, 1);
+
+    if (message.accept) {
+      if (party.memberSessionIds.length >= MAX_PARTY_SIZE) {
+        client.send("partyActionFailed", { reason: "Your group is full." } satisfies PartyActionFailedMessage);
+      } else {
+        party.memberSessionIds.push(message.sessionId);
+        this.partyIdBySession.set(message.sessionId, partyId);
+        this.broadcastPartyState(partyId);
+        this.broadcastOpenParties();
+      }
+    } else {
+      this.clients
+        .getById(message.sessionId)
+        ?.send("partyApplicationDeclined", { partyId } satisfies PartyApplicationDeclinedMessage);
+    }
+    this.sendPartyApplications(partyId);
+  }
+
+  // Applications are private to the leader (unlike the roster, which every
+  // member sees) — pushed wholesale rather than diffed, same "small and
+  // infrequent enough to just resend" call as PartyStateMessage.
+  private sendPartyApplications(partyId: string) {
+    const party = this.parties.get(partyId);
+    if (!party) return;
+    const applicants: PartyApplicantView[] = party.applicantSessionIds
+      .map((applicantSessionId): PartyApplicantView | undefined => {
+        const player = this.state.players.get(applicantSessionId);
+        return player ? { sessionId: applicantSessionId, name: player.name } : undefined;
+      })
+      .filter((applicant): applicant is PartyApplicantView => applicant !== undefined);
+    this.clients
+      .getById(party.leaderSessionId)
+      ?.send("partyApplicationsState", { applicants } satisfies PartyApplicationsStateMessage);
+  }
+
+  // A party disconnecting/reconnecting mid-application isn't tracked across
+  // sessions (parties are session-scoped, not persisted — see the party
+  // system's own scope notes) — this just makes sure a departing applicant
+  // doesn't linger in some other leader's pending list forever.
+  private removeApplicantFromAllParties(sessionId: string) {
+    for (const [partyId, party] of this.parties) {
+      const index = party.applicantSessionIds.indexOf(sessionId);
+      if (index === -1) continue;
+      party.applicantSessionIds.splice(index, 1);
+      this.sendPartyApplications(partyId);
+    }
+  }
+
+  private computeOpenParties(): OpenPartyView[] {
+    const parties: OpenPartyView[] = [];
+    for (const [partyId, party] of this.parties) {
+      if (!party.open || party.memberSessionIds.length >= MAX_PARTY_SIZE) continue;
+      const leader = this.state.players.get(party.leaderSessionId);
+      parties.push({ partyId, leaderName: leader?.name ?? "?", memberCount: party.memberSessionIds.length });
+    }
+    return parties;
+  }
+
+  private broadcastOpenParties() {
+    this.broadcast("openPartiesState", { parties: this.computeOpenParties() } satisfies OpenPartiesStateMessage);
   }
 
   // --- Portals / dungeons ---
@@ -1310,8 +1557,7 @@ export class WorldRoom extends Room<RoomState> {
   // works identically to entering: handleUsePortal already treats "target
   // map isn't a dungeon" as "just rejoin the plain overworld room."
   private spawnExitPortal(x: number, y: number) {
-    if (this.exitPortalSpawned || !this.returnMapId) return;
-    this.exitPortalSpawned = true;
+    if (!this.returnMapId) return;
 
     const id = "exit-portal";
     const portal = new Portal();
@@ -2245,6 +2491,10 @@ export class WorldRoom extends Room<RoomState> {
     if (player.quests.some((e) => this.questsById.get(e.questId)?.objectiveType === "bringItems")) {
       await this.refreshBringItemsReadiness(client.sessionId);
     }
+    // A newly-joined client has nothing to diff against — the browsable
+    // open-parties list only reaches everyone else via future
+    // broadcastOpenParties calls, so this one needs its own initial snapshot.
+    client.send("openPartiesState", { parties: this.computeOpenParties() } satisfies OpenPartiesStateMessage);
 
     console.log(`${player.name} (${player.className}) joined ${this.roomId}`);
   }
@@ -2270,6 +2520,7 @@ export class WorldRoom extends Room<RoomState> {
     }
     const partyId = this.partyIdBySession.get(client.sessionId);
     if (partyId) this.removeFromParty(client.sessionId, partyId);
+    this.removeApplicantFromAllParties(client.sessionId);
 
     if (player && characterId) {
       try {

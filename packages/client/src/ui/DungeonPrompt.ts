@@ -1,28 +1,21 @@
-import type { DungeonPromptMessage, PartyStateMessage } from "shared";
-import type { OnlinePlayerView } from "./Sidebar.js";
+import type { DungeonPromptMessage } from "shared";
 
 export interface DungeonPromptHandlers {
-  onInvite: (targetSessionId: string) => void;
-  onLeave: () => void;
   onEnter: (portalId: string) => void;
   onCancel: () => void;
 }
 
-const EMPTY_PARTY_STATE: PartyStateMessage = { leaderSessionId: null, members: [] };
-
 // A DOM overlay (like NpcDialogue/Sidebar), shown in place of instantly
 // entering a dungeon — gives the player a chance to read what they're
-// walking into and put a group together first. Party membership itself is
-// still the same room-wide party system the sidebar's Party tab drives
-// (WorldRoom's parties map); this just surfaces invite/leave controls right
-// where they're needed instead of requiring a detour to another tab.
+// walking into. Party assembly isn't handled in here directly: show()
+// returns a docking element that the caller (WorldScene) hands to
+// GroupFinder, which renders the actual roster/invite/create-group UI into
+// it — keeping "here's the dungeon" and "here's your group" as two
+// independently reusable pieces that just happen to appear together.
 export class DungeonPrompt {
   private overlay: HTMLDivElement;
   private handlers?: DungeonPromptHandlers;
   private message?: DungeonPromptMessage;
-  private party: PartyStateMessage = EMPTY_PARTY_STATE;
-  private onlinePlayers: OnlinePlayerView[] = [];
-  private mySessionId = "";
 
   constructor() {
     this.overlay = document.createElement("div");
@@ -31,24 +24,14 @@ export class DungeonPrompt {
     document.body.appendChild(this.overlay);
   }
 
-  get isVisible(): boolean {
-    return this.message !== undefined;
-  }
-
-  show(
-    message: DungeonPromptMessage,
-    party: PartyStateMessage,
-    onlinePlayers: OnlinePlayerView[],
-    mySessionId: string,
-    handlers: DungeonPromptHandlers,
-  ) {
+  // Returns the empty dock element the group panel should be rendered into
+  // (see GroupFinder.show) — created fresh each call, since a stale
+  // reference from a previous show() would already have been removed from
+  // the DOM by this same render.
+  show(message: DungeonPromptMessage, handlers: DungeonPromptHandlers): HTMLElement {
     this.message = message;
-    this.party = party;
-    this.onlinePlayers = onlinePlayers;
-    this.mySessionId = mySessionId;
     this.handlers = handlers;
-    this.render();
-    this.overlay.style.display = "flex";
+    return this.render();
   }
 
   hide() {
@@ -57,23 +40,13 @@ export class DungeonPrompt {
     this.overlay.innerHTML = "";
   }
 
-  // Called whenever party/online-player state changes elsewhere (e.g. an
-  // invite is accepted) while this prompt happens to be open, so the
-  // roster/invite list stay live instead of going stale until re-opened.
-  updateParty(party: PartyStateMessage) {
-    this.party = party;
-    if (this.isVisible) this.render();
-  }
-
-  updateOnlinePlayers(players: OnlinePlayerView[]) {
-    this.onlinePlayers = players;
-    if (this.isVisible) this.render();
-  }
-
-  private render() {
+  private render(): HTMLElement {
     const message = this.message;
-    if (!message) return;
+    if (!message) throw new Error("DungeonPrompt.render called with no message");
     this.overlay.innerHTML = "";
+
+    const row = document.createElement("div");
+    row.className = "dungeon-prompt-row";
 
     const panel = document.createElement("div");
     panel.id = "dungeon-prompt-panel";
@@ -94,71 +67,6 @@ export class DungeonPrompt {
       panel.appendChild(description);
     }
 
-    // --- Party: create or join a group before entering ---
-    const partyHeader = document.createElement("div");
-    partyHeader.className = "dungeon-prompt-section-header";
-    partyHeader.textContent = "Your Party";
-    panel.appendChild(partyHeader);
-
-    if (this.party.members.length > 0) {
-      const roster = document.createElement("div");
-      roster.className = "dungeon-prompt-roster";
-      for (const member of this.party.members) {
-        const row = document.createElement("div");
-        row.className = "bag-item";
-        const name = document.createElement("div");
-        name.className = "bag-item-name";
-        const isLeader = member.sessionId === this.party.leaderSessionId;
-        name.textContent = `${isLeader ? "★ " : ""}${member.name}`;
-        const desc = document.createElement("div");
-        desc.className = "bag-item-desc";
-        desc.textContent = `Lvl ${member.level} ${member.className}`;
-        row.append(name, desc);
-        roster.appendChild(row);
-      }
-      panel.appendChild(roster);
-
-      const leaveBtn = document.createElement("button");
-      leaveBtn.className = "dungeon-prompt-leave-btn";
-      leaveBtn.textContent = "Leave Party";
-      leaveBtn.addEventListener("click", () => this.handlers?.onLeave());
-      panel.appendChild(leaveBtn);
-    } else {
-      const empty = document.createElement("div");
-      empty.className = "bag-empty";
-      empty.textContent = "Not in a party — invite someone below, or enter solo.";
-      panel.appendChild(empty);
-    }
-
-    const inPartySessionIds = new Set(this.party.members.map((m) => m.sessionId));
-    const invitable = this.onlinePlayers.filter((p) => p.sessionId !== this.mySessionId);
-    if (invitable.length > 0) {
-      const listHeader = document.createElement("div");
-      listHeader.className = "dungeon-prompt-section-header";
-      listHeader.textContent = "Invite";
-      panel.appendChild(listHeader);
-
-      const list = document.createElement("div");
-      list.className = "dungeon-prompt-invite-list";
-      for (const player of invitable) {
-        const row = document.createElement("div");
-        row.className = "bag-item";
-        const name = document.createElement("div");
-        name.className = "bag-item-name";
-        name.textContent = player.name;
-        row.appendChild(name);
-        if (!inPartySessionIds.has(player.sessionId)) {
-          const button = document.createElement("button");
-          button.textContent = "Invite";
-          button.addEventListener("click", () => this.handlers?.onInvite(player.sessionId));
-          row.appendChild(button);
-        }
-        list.appendChild(row);
-      }
-      panel.appendChild(list);
-    }
-
-    // --- Actions ---
     const actions = document.createElement("div");
     actions.className = "dungeon-prompt-actions";
 
@@ -178,7 +86,15 @@ export class DungeonPrompt {
     actions.appendChild(cancelButton);
 
     panel.appendChild(actions);
-    this.overlay.appendChild(panel);
+    row.appendChild(panel);
+
+    const groupDock = document.createElement("div");
+    groupDock.className = "group-finder-dock";
+    row.appendChild(groupDock);
+
+    this.overlay.appendChild(row);
+    this.overlay.style.display = "flex";
+    return groupDock;
   }
 }
 
