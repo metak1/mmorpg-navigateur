@@ -21,6 +21,13 @@ function buildFields(items: ItemTemplateDTO[]): FieldSpec[] {
     { name: "level", label: "Level", type: "number" },
     { name: "armor", label: "Armor", type: "number" },
     { name: "xpReward", label: "XP Reward", type: "number" },
+    // Optional ranged spell attack on top of the melee touch attack above —
+    // leave all five blank for a melee-only monster (the default).
+    { name: "spellDamage", label: "Spell Damage (blank = no spell)", type: "number" },
+    { name: "spellRange", label: "Spell Range (px)", type: "number" },
+    { name: "spellCastTimeMs", label: "Spell Cast Time (ms)", type: "number" },
+    { name: "spellCooldownMs", label: "Spell Cooldown (ms)", type: "number" },
+    { name: "spellColor", label: "Spell Color (hex, e.g. 0xff5533)", type: "text" },
   ];
 
   // Equipment should drop rarely (low % chance); resources (non-equippable
@@ -50,6 +57,11 @@ const DEFAULT_VALUES: Record<string, string | number> = {
   level: 1,
   armor: 2,
   xpReward: 25,
+  spellDamage: "",
+  spellRange: "",
+  spellCastTimeMs: "",
+  spellCooldownMs: "",
+  spellColor: "",
 };
 for (let i = 1; i <= DROP_SLOT_COUNT; i++) {
   DEFAULT_VALUES[`drop${i}ItemId`] = "";
@@ -59,6 +71,7 @@ for (let i = 1; i <= DROP_SLOT_COUNT; i++) {
 }
 
 function toInput(values: Record<string, string>): MonsterTemplateInput {
+  const num = (key: string): number | null => (values[key] === "" ? null : Number(values[key]));
   const drops: MonsterTemplateInput["drops"] = [];
   for (let i = 1; i <= DROP_SLOT_COUNT; i++) {
     const itemId = values[`drop${i}ItemId`];
@@ -87,6 +100,11 @@ function toInput(values: Record<string, string>): MonsterTemplateInput {
     level: Number(values.level),
     armor: Number(values.armor),
     xpReward: Number(values.xpReward),
+    spellDamage: num("spellDamage"),
+    spellRange: num("spellRange"),
+    spellCastTimeMs: num("spellCastTimeMs"),
+    spellCooldownMs: num("spellCooldownMs"),
+    spellColor: num("spellColor"),
     drops,
   };
 }
@@ -106,6 +124,11 @@ function monsterToFormValues(monster: MonsterTemplateDTO): Record<string, string
     level: monster.level,
     armor: monster.armor,
     xpReward: monster.xpReward,
+    spellDamage: monster.spellDamage ?? "",
+    spellRange: monster.spellRange ?? "",
+    spellCastTimeMs: monster.spellCastTimeMs ?? "",
+    spellCooldownMs: monster.spellCooldownMs ?? "",
+    spellColor: monster.spellColor != null ? `0x${monster.spellColor.toString(16)}` : "",
   };
   for (let i = 1; i <= DROP_SLOT_COUNT; i++) {
     values[`drop${i}ItemId`] = "";

@@ -24,6 +24,11 @@ function toDTO(monster: MonsterTemplate & { drops: MonsterDrop[] }): MonsterTemp
     level: monster.level,
     armor: monster.armor,
     xpReward: monster.xpReward,
+    spellDamage: monster.spellDamage,
+    spellRange: monster.spellRange,
+    spellCastTimeMs: monster.spellCastTimeMs,
+    spellCooldownMs: monster.spellCooldownMs,
+    spellColor: monster.spellColor,
     drops: monster.drops.map((d) => ({
       id: d.id,
       itemId: d.itemId,
@@ -49,6 +54,11 @@ function toData(body: MonsterTemplateInput) {
     level: body.level,
     armor: body.armor,
     xpReward: body.xpReward,
+    spellDamage: body.spellDamage,
+    spellRange: body.spellRange,
+    spellCastTimeMs: body.spellCastTimeMs,
+    spellCooldownMs: body.spellCooldownMs,
+    spellColor: body.spellColor,
   };
 }
 

@@ -175,6 +175,21 @@
       }
       #admin-tools button:hover { background: #3a2a14; }
 
+      #party-panel { display: flex; flex-direction: column; gap: 6px; }
+      #party-roster { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+      #party-leave-btn {
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: 1px solid #ff5555;
+        background: #2a1010;
+        color: #ff5555;
+        font-weight: bold;
+        cursor: pointer;
+        margin-bottom: 4px;
+      }
+      #party-leave-btn:hover { background: #3a1414; }
+
       /* Rarity accents, reused for both equipped slots and bag rows. */
       .rarity-common { border-color: #555 !important; }
       .rarity-rare { border-color: #4d9fff !important; }
@@ -242,19 +257,21 @@
       }
 
       #talent-points { color: #ffcc33; font-size: 13px; font-weight: 600; margin-bottom: 16px; }
-      /* Node positions are plain block-flow (one flex row per tier); the
-         connector lines are an absolutely-positioned SVG overlay drawn on
-         top once the nodes are laid out — see Sidebar.renderTalents. */
-      #talent-tree { position: relative; }
+      /* Each tier is a CSS grid with the same fixed column tracks (set
+         inline per row from Sidebar.renderTalents, via
+         assignTalentColumns) so a given column lines up pixel-for-pixel
+         across every row — that's what keeps a talent directly under its
+         prerequisite. The connector lines are an absolutely-positioned SVG
+         overlay drawn on top once the nodes are laid out. */
+      #talent-tree { position: relative; overflow-x: auto; }
       #talent-lines { position: absolute; top: 0; left: 0; pointer-events: none; }
       .talent-line { stroke: #3a3a3a; stroke-width: 2; }
       .talent-line.active { stroke: #ffcc33; }
       .talent-tier-row {
         position: relative;
         z-index: 1;
-        display: flex;
+        display: grid;
         justify-content: center;
-        flex-wrap: wrap;
         gap: 28px;
         margin-bottom: 40px;
       }
@@ -396,6 +413,85 @@
         color: #ccc;
         cursor: pointer;
       }
+
+      #dungeon-prompt-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: rgba(0, 0, 0, 0.5);
+        font-family: sans-serif;
+      }
+      #dungeon-prompt-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 20px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        min-width: 320px;
+        max-width: 420px;
+        max-height: 80vh;
+        overflow-y: auto;
+      }
+      #dungeon-prompt-panel h3 { margin: 0; color: #9d4dff; font-size: 16px; }
+      .dungeon-prompt-min-level { color: #ffcc66; font-size: 12px; font-weight: 600; }
+      .dungeon-prompt-description { margin: 0; color: #ccc; font-size: 13px; line-height: 1.4; }
+      .dungeon-prompt-section-header {
+        color: #999;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #2a2a2a;
+      }
+      .dungeon-prompt-roster, .dungeon-prompt-invite-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+      .dungeon-prompt-leave-btn {
+        align-self: flex-start;
+        margin-top: 4px;
+        padding: 6px 12px;
+        font-size: 12px;
+        border-radius: 4px;
+        border: 1px solid #ff5555;
+        background: #2a1010;
+        color: #ff5555;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      .dungeon-prompt-leave-btn:hover { background: #3a1414; }
+      .dungeon-prompt-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #2a2a2a;
+      }
+      .dungeon-prompt-enter-btn {
+        padding: 8px 16px;
+        font-size: 13px;
+        border-radius: 4px;
+        border: none;
+        background: #9d4dff;
+        color: #fff;
+        font-weight: bold;
+        cursor: pointer;
+      }
+      .dungeon-prompt-enter-btn:hover { background: #b06bff; }
+      .dungeon-prompt-cancel-btn {
+        padding: 8px 16px;
+        font-size: 13px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: none;
+        color: #ccc;
+        cursor: pointer;
+      }
+      .dungeon-prompt-cancel-btn:hover { background: #262626; }
 
       .auth-overlay {
         position: fixed;
@@ -597,6 +693,7 @@
           <span class="sidebar-tab" data-panel="quests">Quest Log <kbd>L</kbd></span>
           <span class="sidebar-tab" data-panel="stats">Character <kbd>K</kbd></span>
           <span class="sidebar-tab" data-panel="talents">Talents <kbd>T</kbd></span>
+          <span class="sidebar-tab" data-panel="party">Party <kbd>P</kbd></span>
         </div>
         <div id="sidebar-body">Coming soon</div>
       </aside>

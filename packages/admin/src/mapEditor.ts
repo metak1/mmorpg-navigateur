@@ -47,8 +47,9 @@ type Tool =
   | { kind: "tile"; tileType: number }
   | { kind: "elevation" }
   | { kind: "player-spawn" }
-  | { kind: "monster-spawn"; monsterTemplateId: string }
-  | { kind: "npc-spawn"; npcTemplateId: string };
+  | { kind: "monster-spawn"; monsterTemplateId: string; isBoss: boolean }
+  | { kind: "npc-spawn"; npcTemplateId: string }
+  | { kind: "portal"; targetMapId: string };
 
 interface CellState {
   tileType: number;
@@ -103,6 +104,9 @@ export function renderMapEditor(
   initialMap: EditableMap,
   monsters: MonsterTemplateDTO[],
   npcs: NpcTemplateDTO[],
+  // Every other map, for the portal tool's "where does this lead" dropdown —
+  // the map currently being edited is excluded by the caller.
+  maps: GameMapDTO[],
   // Undefined mapId (brand-new, unsaved map) means there's nothing painted
   // yet anywhere — callers should skip fetching entirely in that case.
   fetchTiles: (minCol: number, minRow: number, maxCol: number, maxRow: number) => Promise<MapTileDTO[]>,
@@ -114,12 +118,16 @@ export function renderMapEditor(
     tileSize: initialMap.tileSize,
     ambientSpawnChance: initialMap.ambientSpawnChance,
     cliffColor: initialMap.cliffColor,
+    isDungeon: initialMap.isDungeon,
+    minLevel: initialMap.minLevel,
+    description: initialMap.description,
     playerSpawnCol: Math.floor(initialMap.spawnX / initialMap.tileSize),
     playerSpawnRow: Math.floor(initialMap.spawnY / initialMap.tileSize),
     monsterSpawns: initialMap.spawns.map((s) => ({
       col: Math.floor(s.x / initialMap.tileSize),
       row: Math.floor(s.y / initialMap.tileSize),
       monsterTemplateId: s.monsterTemplateId,
+      isBoss: s.isBoss,
     })),
     npcSpawns: initialMap.npcSpawns.map((s) => ({
       col: Math.floor(s.x / initialMap.tileSize),
@@ -127,6 +135,11 @@ export function renderMapEditor(
       npcTemplateId: s.npcTemplateId,
     })),
     ambientSpawns: initialMap.ambientSpawns.map((a) => ({ monsterTemplateId: a.monsterTemplateId, weight: a.weight })),
+    portals: initialMap.portals.map((p) => ({
+      col: Math.floor(p.x / initialMap.tileSize),
+      row: Math.floor(p.y / initialMap.tileSize),
+      targetMapId: p.targetMapId,
+    })),
   };
 
   // Camera lives in PROJECTED space (isoProject's output units) — cameraProjX/Y
@@ -153,20 +166,19 @@ export function renderMapEditor(
   const wrapper = document.createElement("div");
   wrapper.className = "map-editor";
 
-  const nameRow = document.createElement("div");
-  nameRow.className = "map-editor-toolbar";
-  const nameLabel = document.createElement("label");
-  nameLabel.textContent = "Map name ";
-  const nameInput = document.createElement("input");
-  nameInput.value = state.name;
-  nameInput.addEventListener("input", () => {
-    state.name = nameInput.value;
-  });
-  nameLabel.appendChild(nameInput);
-  nameRow.appendChild(nameLabel);
+  const layout = document.createElement("div");
+  layout.className = "map-editor-layout";
 
-  const toolbar = document.createElement("div");
-  toolbar.className = "map-editor-toolbar";
+  // --- Palette: Unity-Tile-Palette-style side panel. Click an item to arm
+  // it as the active tool (selectTool), then click the canvas to place it
+  // (applyToolAt) — every tab below funnels into that same two-step flow. ---
+  const palette = document.createElement("div");
+  palette.className = "map-editor-palette";
+  const paletteTabs = document.createElement("div");
+  paletteTabs.className = "palette-tabs";
+  const paletteBody = document.createElement("div");
+  paletteBody.className = "palette-body";
+  palette.append(paletteTabs, paletteBody);
 
   const toolButtons: HTMLButtonElement[] = [];
 
@@ -176,47 +188,217 @@ export function renderMapEditor(
     btn.classList.add("active");
   }
 
+  const paletteSections = new Map<string, HTMLElement>();
+  const paletteTabButtons = new Map<string, HTMLButtonElement>();
+
+  function showPaletteTab(key: string) {
+    for (const [k, section] of paletteSections) section.classList.toggle("active", k === key);
+    for (const [k, btn] of paletteTabButtons) btn.classList.toggle("active", k === key);
+  }
+
+  function addPaletteTab(key: string, label: string): HTMLElement {
+    const tabBtn = document.createElement("button");
+    tabBtn.type = "button";
+    tabBtn.className = "palette-tab";
+    tabBtn.textContent = label;
+    tabBtn.addEventListener("click", () => showPaletteTab(key));
+    paletteTabs.appendChild(tabBtn);
+    paletteTabButtons.set(key, tabBtn);
+
+    const section = document.createElement("div");
+    section.className = "palette-section";
+    paletteBody.appendChild(section);
+    paletteSections.set(key, section);
+    return section;
+  }
+
+  // A palette item is itself the tool-select control — no separate dropdown
+  // + "activate" button like the old toolbar had; clicking "Goblin" arms
+  // the monster-spawn tool for Goblin directly.
+  function addPaletteItem(
+    section: HTMLElement,
+    label: string,
+    swatchColor: string | null,
+    onClick: (item: HTMLButtonElement) => void,
+  ): HTMLButtonElement {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "palette-item";
+    if (swatchColor) {
+      const swatch = document.createElement("span");
+      swatch.className = "palette-swatch";
+      swatch.style.background = swatchColor;
+      item.appendChild(swatch);
+    }
+    const text = document.createElement("span");
+    text.textContent = label;
+    item.appendChild(text);
+    item.addEventListener("click", () => onClick(item));
+    section.appendChild(item);
+    toolButtons.push(item);
+    return item;
+  }
+
+  // --- Tiles ---
+  const tilesSection = addPaletteTab("tiles", "Tiles");
   const tileButtons: Array<{ label: string; tileType: number }> = [
     { label: "Grass", tileType: TileType.Grass },
     { label: "Path", tileType: TileType.Path },
     { label: "Water", tileType: TileType.Water },
     { label: "Wall", tileType: TileType.Wall },
   ];
-
   for (const { label, tileType } of tileButtons) {
-    const btn = document.createElement("button");
-    btn.textContent = label;
-    btn.style.background = TILE_COLORS[tileType];
-    btn.style.color = "#111";
-    btn.addEventListener("click", () => selectTool({ kind: "tile", tileType }, btn));
-    toolButtons.push(btn);
-    toolbar.appendChild(btn);
+    addPaletteItem(tilesSection, label, TILE_COLORS[tileType], (item) => selectTool({ kind: "tile", tileType }, item));
   }
 
-  // Elevation is a separate paintable attribute from tile type, applied to
-  // whatever's already at a cell rather than replacing it — see
-  // applyToolAt. The number input's live value is read at paint time (not
-  // captured into the Tool), so changing it doesn't require reselecting.
+  // --- Elevation ---
+  // A separate paintable attribute from tile type, applied to whatever's
+  // already at a cell rather than replacing it — see applyToolAt. The
+  // number input's live value is read at paint time (not captured into the
+  // Tool), so changing it doesn't require reselecting.
+  const elevationSection = addPaletteTab("elevation", "Elevation");
+  const elevationFieldLabel = document.createElement("label");
+  elevationFieldLabel.className = "palette-field";
+  elevationFieldLabel.textContent = `Level (${MIN_ELEVATION}..${MAX_ELEVATION})`;
   const elevationInput = document.createElement("input");
   elevationInput.type = "number";
   elevationInput.min = String(MIN_ELEVATION);
   elevationInput.max = String(MAX_ELEVATION);
   elevationInput.step = "1";
   elevationInput.value = "1";
-  elevationInput.title = `Elevation level (${MIN_ELEVATION}..${MAX_ELEVATION})`;
+  elevationFieldLabel.appendChild(elevationInput);
+  elevationSection.appendChild(elevationFieldLabel);
+  addPaletteItem(elevationSection, "Elevation Tool", null, (item) => selectTool({ kind: "elevation" }, item));
 
-  const elevationBtn = document.createElement("button");
-  elevationBtn.textContent = "Elevation";
-  elevationBtn.addEventListener("click", () => selectTool({ kind: "elevation" }, elevationBtn));
-  toolButtons.push(elevationBtn);
-  toolbar.append(elevationBtn, elevationInput);
+  // --- Spawn (player start point) ---
+  const spawnSection = addPaletteTab("spawn", "Spawn");
+  addPaletteItem(spawnSection, "Player Spawn", null, (item) => selectTool({ kind: "player-spawn" }, item));
+
+  // --- Monsters ---
+  const monstersSection = addPaletteTab("monsters", "Monsters");
+  // Marks the placement (not the template — the same monster could be
+  // placed several times) as a dungeon's boss. Captured into the tool at
+  // click time, same as which monster was clicked.
+  const isBossLabel = document.createElement("label");
+  isBossLabel.className = "palette-field-inline";
+  const isBossInput = document.createElement("input");
+  isBossInput.type = "checkbox";
+  isBossLabel.append(isBossInput, document.createTextNode(" Mark as boss"));
+  monstersSection.appendChild(isBossLabel);
+  if (monsters.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "palette-empty";
+    empty.textContent = "No monsters yet";
+    monstersSection.appendChild(empty);
+  }
+  for (const m of monsters) {
+    addPaletteItem(monstersSection, m.name, colorFor(m.id), (item) =>
+      selectTool({ kind: "monster-spawn", monsterTemplateId: m.id, isBoss: isBossInput.checked }, item),
+    );
+  }
+
+  // --- NPCs ---
+  const npcsSection = addPaletteTab("npcs", "NPCs");
+  if (npcs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "palette-empty";
+    empty.textContent = "No NPCs yet";
+    npcsSection.appendChild(empty);
+  }
+  for (const n of npcs) {
+    addPaletteItem(npcsSection, n.name, colorFor(n.id), (item) => selectTool({ kind: "npc-spawn", npcTemplateId: n.id }, item));
+  }
+
+  // --- Portals ---
+  // A portal leading to no map isn't meaningful, so the tab just explains
+  // that instead of offering anything to click — matches this editor's
+  // general style of not over-validating (see the module-level comment on
+  // cycle detection being skipped for talent prerequisites).
+  const portalsSection = addPaletteTab("portals", "Portals");
+  if (maps.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "palette-empty";
+    empty.textContent = "No other maps to link to yet";
+    portalsSection.appendChild(empty);
+  } else {
+    for (const m of maps) {
+      addPaletteItem(portalsSection, `${m.name}${m.isDungeon ? " (dungeon)" : ""}`, null, (item) =>
+        selectTool({ kind: "portal", targetMapId: m.id }, item),
+      );
+    }
+  }
+
+  // --- Settings (map-wide, not a placeable tool) ---
+  const settingsSection = addPaletteTab("settings", "Settings");
+
+  const nameFieldLabel = document.createElement("label");
+  nameFieldLabel.className = "palette-field";
+  nameFieldLabel.textContent = "Map name";
+  const nameInput = document.createElement("input");
+  nameInput.value = state.name;
+  nameInput.addEventListener("input", () => {
+    state.name = nameInput.value;
+  });
+  nameFieldLabel.appendChild(nameInput);
+  settingsSection.appendChild(nameFieldLabel);
+
+  // A dungeon map is never the (single) active overworld map — it's only
+  // ever reached through a portal, as its own instanced room. minLevel
+  // gates entry (checked against every member of the entering party) and
+  // only matters when isDungeon is checked.
+  const isDungeonLabel = document.createElement("label");
+  isDungeonLabel.className = "palette-field-inline";
+  const isDungeonInput = document.createElement("input");
+  isDungeonInput.type = "checkbox";
+  isDungeonInput.checked = state.isDungeon;
+  isDungeonLabel.append(isDungeonInput, document.createTextNode(" Dungeon"));
+  settingsSection.appendChild(isDungeonLabel);
+
+  const minLevelFieldLabel = document.createElement("label");
+  minLevelFieldLabel.className = "palette-field";
+  minLevelFieldLabel.textContent = "Min level to enter";
+  const minLevelInput = document.createElement("input");
+  minLevelInput.type = "number";
+  minLevelInput.min = "1";
+  minLevelInput.step = "1";
+  minLevelInput.value = String(state.minLevel);
+  minLevelFieldLabel.style.display = state.isDungeon ? "" : "none";
+  isDungeonInput.addEventListener("change", () => {
+    state.isDungeon = isDungeonInput.checked;
+    minLevelFieldLabel.style.display = state.isDungeon ? "" : "none";
+  });
+  minLevelInput.addEventListener("input", () => {
+    state.minLevel = Math.max(1, Math.round(Number(minLevelInput.value)) || 1);
+  });
+  minLevelFieldLabel.appendChild(minLevelInput);
+  settingsSection.appendChild(minLevelFieldLabel);
+
+  // Shown to players in the entry prompt before they commit to a dungeon —
+  // only meaningful (and only shown here) when isDungeon is checked, same
+  // gating as minLevel above.
+  const descriptionFieldLabel = document.createElement("label");
+  descriptionFieldLabel.className = "palette-field";
+  descriptionFieldLabel.textContent = "Dungeon description";
+  const descriptionInput = document.createElement("textarea");
+  descriptionInput.rows = 3;
+  descriptionInput.value = state.description;
+  descriptionFieldLabel.style.display = state.isDungeon ? "" : "none";
+  isDungeonInput.addEventListener("change", () => {
+    descriptionFieldLabel.style.display = state.isDungeon ? "" : "none";
+  });
+  descriptionInput.addEventListener("input", () => {
+    state.description = descriptionInput.value;
+  });
+  descriptionFieldLabel.appendChild(descriptionInput);
+  settingsSection.appendChild(descriptionFieldLabel);
 
   // Solid fill color for the "riser" face drawn between two tiles of
   // different elevation (see draw()'s drawCliffFace) — e.g. brown for a
   // dirt cliff, gray for stone if building a castle. Saved per-map so the
   // actual game renders the same color, not just the editor preview.
-  const cliffColorLabel = document.createElement("label");
-  cliffColorLabel.textContent = " Cliff color ";
+  const cliffColorFieldLabel = document.createElement("label");
+  cliffColorFieldLabel.className = "palette-field";
+  cliffColorFieldLabel.textContent = "Cliff color";
   const cliffColorInput = document.createElement("input");
   cliffColorInput.type = "color";
   cliffColorInput.value = numberToCssColor(state.cliffColor);
@@ -224,8 +406,11 @@ export function renderMapEditor(
     state.cliffColor = cssColorToNumber(cliffColorInput.value);
     draw();
   });
-  cliffColorLabel.appendChild(cliffColorInput);
-  toolbar.appendChild(cliffColorLabel);
+  cliffColorFieldLabel.appendChild(cliffColorInput);
+  settingsSection.appendChild(cliffColorFieldLabel);
+
+  const cliffPresetsRow = document.createElement("div");
+  cliffPresetsRow.className = "palette-preset-row";
   for (const preset of CLIFF_COLOR_PRESETS) {
     const presetBtn = document.createElement("button");
     presetBtn.type = "button";
@@ -237,54 +422,68 @@ export function renderMapEditor(
       cliffColorInput.value = numberToCssColor(preset.value);
       draw();
     });
-    toolbar.appendChild(presetBtn);
+    cliffPresetsRow.appendChild(presetBtn);
+  }
+  settingsSection.appendChild(cliffPresetsRow);
+
+  // Ambient (procedural) spawn config — which monsters can appear as
+  // players wander into unpainted territory, and how often.
+  const ambientChanceFieldLabel = document.createElement("label");
+  ambientChanceFieldLabel.className = "palette-field";
+  ambientChanceFieldLabel.textContent = "Ambient spawn chance per chunk (0-1)";
+  const ambientChanceInput = document.createElement("input");
+  ambientChanceInput.type = "number";
+  ambientChanceInput.min = "0";
+  ambientChanceInput.max = "1";
+  ambientChanceInput.step = "0.05";
+  ambientChanceInput.value = String(state.ambientSpawnChance);
+  ambientChanceInput.addEventListener("input", () => {
+    state.ambientSpawnChance = Number(ambientChanceInput.value) || 0;
+  });
+  ambientChanceFieldLabel.appendChild(ambientChanceInput);
+  settingsSection.appendChild(ambientChanceFieldLabel);
+
+  const ambientSubheading = document.createElement("div");
+  ambientSubheading.className = "palette-subheading";
+  ambientSubheading.textContent = "Ambient spawns";
+  settingsSection.appendChild(ambientSubheading);
+
+  const monsterOptionsWithNone = [{ value: "", label: "-- none --" }, ...monsters.map((m) => ({ value: m.id, label: m.name }))];
+  const ambientRows: Array<{ select: HTMLSelectElement; weight: HTMLInputElement }> = [];
+  for (let i = 0; i < AMBIENT_SLOT_COUNT; i++) {
+    const rule = state.ambientSpawns[i];
+    const row = document.createElement("div");
+    row.className = "palette-ambient-row";
+    const select = document.createElement("select");
+    for (const opt of monsterOptionsWithNone) {
+      const el = document.createElement("option");
+      el.value = opt.value;
+      el.textContent = opt.label;
+      select.appendChild(el);
+    }
+    select.value = rule?.monsterTemplateId ?? "";
+    const weight = document.createElement("input");
+    weight.type = "number";
+    weight.min = "0";
+    weight.step = "0.5";
+    weight.value = String(rule?.weight ?? 1);
+    row.append(select, weight);
+    settingsSection.appendChild(row);
+    ambientRows.push({ select, weight });
   }
 
-  const spawnBtn = document.createElement("button");
-  spawnBtn.textContent = "Player Spawn";
-  spawnBtn.addEventListener("click", () => selectTool({ kind: "player-spawn" }, spawnBtn));
-  toolButtons.push(spawnBtn);
-  toolbar.appendChild(spawnBtn);
-
-  const monsterSelect = document.createElement("select");
-  for (const m of monsters) {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = m.name;
-    monsterSelect.appendChild(opt);
-  }
-  toolbar.appendChild(monsterSelect);
-
-  const monsterSpawnBtn = document.createElement("button");
-  monsterSpawnBtn.textContent = "Monster Spawn (click to toggle)";
-  monsterSpawnBtn.addEventListener("click", () =>
-    selectTool({ kind: "monster-spawn", monsterTemplateId: monsterSelect.value }, monsterSpawnBtn),
-  );
-  toolButtons.push(monsterSpawnBtn);
-  toolbar.appendChild(monsterSpawnBtn);
-
-  const npcSelect = document.createElement("select");
-  for (const n of npcs) {
-    const opt = document.createElement("option");
-    opt.value = n.id;
-    opt.textContent = n.name;
-    npcSelect.appendChild(opt);
-  }
-  toolbar.appendChild(npcSelect);
-
-  const npcSpawnBtn = document.createElement("button");
-  npcSpawnBtn.textContent = "NPC Spawn (click to toggle)";
-  npcSpawnBtn.addEventListener("click", () => selectTool({ kind: "npc-spawn", npcTemplateId: npcSelect.value }, npcSpawnBtn));
-  toolButtons.push(npcSpawnBtn);
-  toolbar.appendChild(npcSpawnBtn);
-
+  showPaletteTab("tiles");
   toolButtons[0]?.classList.add("active");
+
+  // --- Main column: view controls, canvas, save/cancel ---
+  const main = document.createElement("div");
+  main.className = "map-editor-main";
 
   // Pan/zoom controls — the canvas shows a fixed-size window into an
   // unbounded world; these move the camera instead of resizing a bounded
   // grid, which no longer exists.
   const viewToolbar = document.createElement("div");
-  viewToolbar.className = "map-editor-toolbar";
+  viewToolbar.className = "map-editor-viewbar";
 
   function addViewButton(label: string, onClick: () => void) {
     const btn = document.createElement("button");
@@ -314,45 +513,6 @@ export function renderMapEditor(
   const coordsLabel = document.createElement("span");
   coordsLabel.className = "map-editor-coords";
   viewToolbar.appendChild(coordsLabel);
-
-  // Ambient (procedural) spawn config — which monsters can appear as
-  // players wander into unpainted territory, and how often.
-  const ambientSection = document.createElement("div");
-  ambientSection.className = "map-editor-toolbar";
-  const ambientChanceLabel = document.createElement("label");
-  ambientChanceLabel.textContent = "Ambient spawn chance per chunk (0-1) ";
-  const ambientChanceInput = document.createElement("input");
-  ambientChanceInput.type = "number";
-  ambientChanceInput.min = "0";
-  ambientChanceInput.max = "1";
-  ambientChanceInput.step = "0.05";
-  ambientChanceInput.value = String(state.ambientSpawnChance);
-  ambientChanceInput.addEventListener("input", () => {
-    state.ambientSpawnChance = Number(ambientChanceInput.value) || 0;
-  });
-  ambientChanceLabel.appendChild(ambientChanceInput);
-  ambientSection.appendChild(ambientChanceLabel);
-
-  const monsterOptionsWithNone = [{ value: "", label: "-- none --" }, ...monsters.map((m) => ({ value: m.id, label: m.name }))];
-  const ambientRows: Array<{ select: HTMLSelectElement; weight: HTMLInputElement }> = [];
-  for (let i = 0; i < AMBIENT_SLOT_COUNT; i++) {
-    const rule = state.ambientSpawns[i];
-    const select = document.createElement("select");
-    for (const opt of monsterOptionsWithNone) {
-      const el = document.createElement("option");
-      el.value = opt.value;
-      el.textContent = opt.label;
-      select.appendChild(el);
-    }
-    select.value = rule?.monsterTemplateId ?? "";
-    const weight = document.createElement("input");
-    weight.type = "number";
-    weight.min = "0";
-    weight.step = "0.5";
-    weight.value = String(rule?.weight ?? 1);
-    ambientSection.append(select, weight);
-    ambientRows.push({ select, weight });
-  }
 
   const canvas = document.createElement("canvas");
   canvas.width = CANVAS_WIDTH;
@@ -657,6 +817,19 @@ export function renderMapEditor(
       const size = Math.max(4, 10 * zoom);
       ctx.fillRect(pos.x - size / 2, pos.y - size / 2, size, size);
     }
+
+    // Rings (vs. monsters' filled circles and NPCs' squares) so a portal
+    // reads as distinct from either at a glance — fixed color, since a
+    // portal isn't "of" any template to hash a color from.
+    for (const portal of state.portals) {
+      const elevation = cellAt(portal.col, portal.row).elevation;
+      const pos = worldToScreen(portal.col * tileSize + tileSize / 2, portal.row * tileSize + tileSize / 2, elevation, tileSize);
+      ctx.strokeStyle = "#9d4dff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, Math.max(4, 9 * zoom), 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   // Resolves a click to the tile actually rendered under the cursor —
@@ -695,7 +868,7 @@ export function renderMapEditor(
       if (existingIndex >= 0) {
         state.monsterSpawns.splice(existingIndex, 1);
       } else {
-        state.monsterSpawns.push({ col, row, monsterTemplateId: tool.monsterTemplateId });
+        state.monsterSpawns.push({ col, row, monsterTemplateId: tool.monsterTemplateId, isBoss: tool.isBoss });
       }
     } else if (tool.kind === "npc-spawn") {
       const existingIndex = state.npcSpawns.findIndex((s) => s.col === col && s.row === row);
@@ -703,6 +876,13 @@ export function renderMapEditor(
         state.npcSpawns.splice(existingIndex, 1);
       } else {
         state.npcSpawns.push({ col, row, npcTemplateId: tool.npcTemplateId });
+      }
+    } else if (tool.kind === "portal") {
+      const existingIndex = state.portals.findIndex((p) => p.col === col && p.row === row);
+      if (existingIndex >= 0) {
+        state.portals.splice(existingIndex, 1);
+      } else {
+        state.portals.push({ col, row, targetMapId: tool.targetMapId });
       }
     }
     draw();
@@ -735,7 +915,11 @@ export function renderMapEditor(
   let panningFrom: { clientX: number; clientY: number; cameraProjX: number; cameraProjY: number } | null = null;
 
   canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 2) {
+    // Middle-button drag pans (left is reserved entirely for placing/
+    // painting the selected palette tool) — preventDefault stops the
+    // browser's own middle-click autoscroll cursor from taking over.
+    if (e.button === 1) {
+      e.preventDefault();
       panningFrom = { clientX: e.clientX, clientY: e.clientY, cameraProjX, cameraProjY };
       return;
     }
@@ -790,12 +974,16 @@ export function renderMapEditor(
       tileSize,
       ambientSpawnChance: state.ambientSpawnChance,
       cliffColor: state.cliffColor,
+      isDungeon: state.isDungeon,
+      minLevel: state.minLevel,
+      description: state.description,
       spawnX: state.playerSpawnCol * tileSize + tileSize / 2,
       spawnY: state.playerSpawnRow * tileSize + tileSize / 2,
       spawns: state.monsterSpawns.map((s) => ({
         monsterTemplateId: s.monsterTemplateId,
         x: s.col * tileSize + tileSize / 2,
         y: s.row * tileSize + tileSize / 2,
+        isBoss: s.isBoss,
       })),
       npcSpawns: state.npcSpawns.map((s) => ({
         npcTemplateId: s.npcTemplateId,
@@ -803,6 +991,11 @@ export function renderMapEditor(
         y: s.row * tileSize + tileSize / 2,
       })),
       ambientSpawns,
+      portals: state.portals.map((p) => ({
+        targetMapId: p.targetMapId,
+        x: p.col * tileSize + tileSize / 2,
+        y: p.row * tileSize + tileSize / 2,
+      })),
     };
     const tiles: MapTileDTO[] = [...dirtyTiles.entries()].map(([key, cell]) => {
       const [col, row] = key.split(",").map(Number);
@@ -826,7 +1019,9 @@ export function renderMapEditor(
 
   actions.append(saveBtn, cancelBtn);
 
-  wrapper.append(nameRow, toolbar, viewToolbar, ambientSection, canvas, actions);
+  main.append(viewToolbar, canvas, actions);
+  layout.append(palette, main);
+  wrapper.append(layout);
   container.appendChild(wrapper);
   draw();
   void loadVisibleRange();

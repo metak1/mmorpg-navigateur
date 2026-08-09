@@ -82,8 +82,82 @@
       .new-map-form input { background: #111; border: 1px solid #333; color: #eee; padding: 6px 8px; border-radius: 4px; width: 100px; }
 
       .map-editor { display: flex; flex-direction: column; gap: 12px; }
-      .map-editor-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-      .map-editor-toolbar button.active { outline: 2px solid #00ff88; }
+      .map-editor-layout { display: flex; gap: 12px; align-items: flex-start; }
+
+      /* Unity-Tile-Palette-style side panel: tabs across the top, one
+         scrollable list of clickable "swatches" below — click an item to
+         arm it as the active tool, then click the canvas to place it. */
+      .map-editor-palette {
+        width: 230px;
+        flex-shrink: 0;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        display: flex;
+        flex-direction: column;
+        height: 720px;
+      }
+      .palette-tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid #2a2a2a; flex-shrink: 0; }
+      .palette-tab {
+        flex: 1 1 33%;
+        background: none;
+        border: none;
+        border-radius: 0;
+        border-bottom: 2px solid transparent;
+        padding: 8px 4px;
+        font-size: 11px;
+        color: #999;
+      }
+      .palette-tab:hover { background: #232323; color: #ccc; }
+      .palette-tab.active { color: #00ff88; border-bottom-color: #00ff88; background: none; }
+      .palette-body { padding: 10px; overflow-y: auto; flex: 1; min-height: 0; }
+      .palette-section { display: none; flex-direction: column; gap: 6px; }
+      .palette-section.active { display: flex; }
+      .palette-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        text-align: left;
+        width: 100%;
+      }
+      .palette-item.active { outline: 2px solid #00ff88; border-color: #00ff88; }
+      .palette-swatch {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+      }
+      .palette-empty { color: #666; font-size: 12px; padding: 8px; }
+      .palette-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #999; margin-bottom: 4px; }
+      .palette-field input, .palette-field select, .palette-field textarea {
+        background: #111;
+        border: 1px solid #333;
+        color: #eee;
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      .palette-field textarea { resize: vertical; font-family: inherit; }
+      .palette-field-inline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #999; margin-bottom: 4px; }
+      .palette-subheading {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #777;
+        margin: 8px 0 2px;
+        padding-top: 8px;
+        border-top: 1px solid #2a2a2a;
+      }
+      .palette-preset-row { display: flex; gap: 6px; margin-bottom: 4px; }
+      .palette-ambient-row { display: flex; gap: 6px; margin-bottom: 4px; }
+      .palette-ambient-row select { flex: 1; min-width: 0; }
+      .palette-ambient-row input { width: 60px; }
+
+      .map-editor-main { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+      .map-editor-viewbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
       .map-editor-canvas { border: 1px solid #333; cursor: crosshair; image-rendering: pixelated; }
       .map-editor-actions { display: flex; gap: 8px; }
 

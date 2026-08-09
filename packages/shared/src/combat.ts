@@ -5,6 +5,10 @@ export const PLAYER_RESPAWN_INVULNERABLE_MS = 1000;
 // Shared cooldown applied across all spells whenever any spell is cast, on
 // top of that spell's own cooldown — prevents weaving instant spells together.
 export const GLOBAL_COOLDOWN_MS = 1000;
+// How close a player must be standing to a portal (see WorldRoom.
+// resolvePortalTarget) to click-activate it — same "walk up and interact"
+// shape as an NPC, just with no equivalent range check having existed yet.
+export const PORTAL_INTERACT_RANGE = 64; // px
 
 // Everything below is seed data for prisma/seed.ts (the initial
 // MonsterTemplate + MonsterSpawn content) — the running game always loads

@@ -14,4 +14,12 @@ export class Monster extends Schema {
   // proportional to real distance, so eyeballing "am I in range" from raw
   // pixel closeness is unreliable without a visual boundary.
   @type("number") attackRange: number = 0;
+  // Synced to every nearby client (not just whoever's fighting it) so a
+  // monster's ranged-spell channel is visible as a telegraph/cast bar —
+  // that's the whole point of giving it a cast time at all, since it's what
+  // makes the new per-class interrupt spell meaningful. A flip to true is
+  // itself the "start" signal; the client runs its own castDurationMs timer
+  // from that moment (see WorldScene), no synced start timestamp needed.
+  @type("boolean") casting: boolean = false;
+  @type("number") castDurationMs: number = 0;
 }

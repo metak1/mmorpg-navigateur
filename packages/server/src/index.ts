@@ -5,6 +5,7 @@ import cors from "cors";
 import { Server } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { WorldRoom } from "./rooms/WorldRoom.js";
+import { DUNGEON_ROOM } from "shared";
 import { monstersRouter } from "./api/monsters.js";
 import { spellsRouter } from "./api/spells.js";
 import { mapsRouter } from "./api/maps.js";
@@ -58,6 +59,12 @@ const gameServer = new Server({
 });
 
 gameServer.define(WorldRoom.NAME, WorldRoom);
+// Same class, second name — a dungeon instance is a WorldRoom created with
+// mapId/allowedCharacterIds options (see WorldRoom.handleUsePortal), not a
+// separate implementation. The distinct name means overworld clients can
+// never land in one via ordinary joinOrCreate matchmaking; it's only ever
+// reached via a server-issued roomId.
+gameServer.define(DUNGEON_ROOM, WorldRoom);
 
 gameServer.listen(port, host).then(() => {
   console.log(`Colyseus + REST API listening on http://${host}:${port}`);

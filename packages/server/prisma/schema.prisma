@@ -76,6 +76,15 @@ model MonsterTemplate {
   level              Int      @default(1)
   armor              Float    @default(0)
   xpReward           Int      @default(20)
+  // Optional ranged spell attack, on top of the always-present melee touch
+  // attack above — null (the default, on every existing monster) means
+  // melee-only, zero behavior change. All five are set together or not at
+  // all (see WorldRoom.updateMonsters).
+  spellDamage        Float?
+  spellRange         Float?
+  spellCastTimeMs    Int?
+  spellCooldownMs    Int?
+  spellColor         Int?
   spawns             MonsterSpawn[]
   quests             Quest[]
   drops              MonsterDrop[]
@@ -200,12 +209,38 @@ model GameMap {
   // gray for stone. Purely cosmetic, rendered client-side only. Default is
   // a dirt brown (0x6b4a2f).
   cliffColor         Int      @default(7031343)
+  // A dungeon map is never the (single) active overworld map — it's only
+  // ever entered through a portal, as its own instanced WorldRoom (see
+  // WorldRoom's mapId/allowedCharacterIds room options). minLevel gates
+  // entry (checked against every member of the entering party) and is only
+  // meaningful when isDungeon is true.
+  isDungeon          Boolean  @default(false)
+  minLevel           Int      @default(1)
+  // Shown to players in the dungeon-entry prompt (see WorldRoom's
+  // "dungeonPrompt" message) before they commit to entering — only
+  // meaningful when isDungeon is true, same as minLevel.
+  description        String   @default("")
   spawns             MonsterSpawn[]
   npcSpawns          NpcSpawn[]
   tiles              MapTile[]
   ambientSpawns      MapAmbientSpawn[]
+  portals            MapPortal[] @relation("PortalSource")
+  portalTargetOf     MapPortal[] @relation("PortalTarget")
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+// A portal placed on one map that leads to another. A dungeon's own return
+// portal is just another row, placed on the dungeon map, targeting the
+// overworld map — there's no separate "exit" concept.
+model MapPortal {
+  id          String  @id @default(cuid())
+  mapId       String
+  map         GameMap @relation("PortalSource", fields: [mapId], references: [id], onDelete: Cascade)
+  x           Float
+  y           Float
+  targetMapId String
+  targetMap   GameMap @relation("PortalTarget", fields: [targetMapId], references: [id])
 }
 
 // Sparse hand-painted terrain: only tiles an admin explicitly painted get a
@@ -247,6 +282,12 @@ model MonsterSpawn {
   monsterTemplate   MonsterTemplate @relation(fields: [monsterTemplateId], references: [id], onDelete: Cascade)
   x                 Float
   y                 Float
+  // Marks this specific placement (not the template) as a dungeon's boss —
+  // the same monster template could otherwise be placed multiple times, so
+  // "boss" has to live on the placement, not the template. Meaningful only
+  // on a dungeon map; killing it broadcasts DungeonClearedMessage instead of
+  // (or alongside) the normal per-killer loot.
+  isBoss            Boolean         @default(false)
 }
 
 // An NPC's "kind" (name/color) plus every quest it's involved in. Quests

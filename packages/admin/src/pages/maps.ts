@@ -34,9 +34,13 @@ export async function renderMapsPage(container: HTMLElement) {
         spawnY: tileSize / 2,
         ambientSpawnChance: 0.3,
         cliffColor: 0x6b4a2f, // dirt brown
+        isDungeon: false,
+        minLevel: 1,
+        description: "",
         spawns: [],
         npcSpawns: [],
         ambientSpawns: [],
+        portals: [],
       });
     });
 
@@ -91,13 +95,16 @@ export async function renderMapsPage(container: HTMLElement) {
     heading.textContent = map.id ? `Edit Map: ${map.name}` : "New Map";
     container.appendChild(heading);
 
-    const [monsters, npcs] = await Promise.all([api.listMonsters(), api.listNpcs()]);
+    const [monsters, npcs, maps] = await Promise.all([api.listMonsters(), api.listNpcs(), api.listMaps()]);
 
     renderMapEditor(
       container,
       map,
       monsters,
       npcs,
+      // A portal can't meaningfully target the map currently being edited —
+      // exclude it so the dropdown only offers real destinations.
+      maps.filter((m) => m.id !== map.id),
       (minCol, minRow, maxCol, maxRow) => {
         if (!map.id) return Promise.resolve([]);
         return api.getMapTiles(map.id, minCol, minRow, maxCol, maxRow);

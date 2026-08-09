@@ -33,6 +33,14 @@ export interface MonsterTemplateDTO {
   level: number;
   armor: number;
   xpReward: number;
+  // Optional ranged spell attack, on top of the always-present melee touch
+  // attack above — null means melee-only. All five are set together or not
+  // at all (see WorldRoom.updateMonsters).
+  spellDamage: number | null;
+  spellRange: number | null;
+  spellCastTimeMs: number | null;
+  spellCooldownMs: number | null;
+  spellColor: number | null;
   drops: MonsterDropDTO[];
 }
 
@@ -107,6 +115,9 @@ export interface MonsterSpawnDTO {
   monsterTemplateId: string;
   x: number;
   y: number;
+  // Marks this specific placement (not the template) as a dungeon's boss —
+  // see MonsterSpawn.isBoss in schema.prisma.
+  isBoss: boolean;
 }
 
 export type MonsterSpawnInput = Omit<MonsterSpawnDTO, "id" | "mapId">;
@@ -218,6 +229,15 @@ export interface AmbientSpawnDTO {
 
 export type AmbientSpawnInput = Omit<AmbientSpawnDTO, "id">;
 
+export interface MapPortalDTO {
+  id: string;
+  x: number;
+  y: number;
+  targetMapId: string;
+}
+
+export type MapPortalInput = Omit<MapPortalDTO, "id">;
+
 export interface GameMapDTO {
   id: string;
   name: string;
@@ -229,15 +249,25 @@ export interface GameMapDTO {
   // Solid fill color (0xrrggbb) for the "riser" face drawn between two
   // adjacent tiles with different elevation — purely cosmetic.
   cliffColor: number;
+  // A dungeon map is never the active overworld map — it's only reached
+  // through a portal, as its own instanced room. minLevel is only
+  // meaningful when isDungeon is true.
+  isDungeon: boolean;
+  minLevel: number;
+  // Shown to players in the dungeon-entry prompt before they commit to
+  // entering — only meaningful when isDungeon is true, same as minLevel.
+  description: string;
   spawns: MonsterSpawnDTO[];
   npcSpawns: NpcSpawnDTO[];
   ambientSpawns: AmbientSpawnDTO[];
+  portals: MapPortalDTO[];
 }
 
-export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns" | "ambientSpawns"> & {
+export type GameMapInput = Omit<GameMapDTO, "id" | "isActive" | "spawns" | "npcSpawns" | "ambientSpawns" | "portals"> & {
   spawns: MonsterSpawnInput[];
   npcSpawns: NpcSpawnInput[];
   ambientSpawns: AmbientSpawnInput[];
+  portals: MapPortalInput[];
 };
 
 // The active map's terrain is not shipped in this response — it's infinite,

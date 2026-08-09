@@ -1,5 +1,5 @@
 export type SpellId = 1 | 2 | 3 | 4 | 5 | 6;
-export type SpellKind = "single" | "aoe" | "heal" | "slow" | "groundAoe";
+export type SpellKind = "single" | "aoe" | "heal" | "slow" | "groundAoe" | "interrupt";
 
 export interface SpellDef {
   name: string;
@@ -11,7 +11,11 @@ export interface SpellDef {
   // single / aoe / slow
   damage?: number;
   projectileSpeed?: number;
-  maxRange?: number; // also used by groundAoe as the max cast distance from the caster
+  // Also used by groundAoe as the max cast distance from the caster, and by
+  // interrupt as its max targeting distance — interrupt uses nothing else
+  // (no damage/heal/aoe/projectile: it's a pure instant utility effect that
+  // cancels a monster's in-progress cast, see WorldRoom.resolveCastEffect).
+  maxRange?: number;
   // aoe / groundAoe
   aoeRadius?: number;
   // slow only

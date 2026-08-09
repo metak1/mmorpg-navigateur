@@ -6,9 +6,10 @@ import {
   type InventoryStateMessage,
   type TalentTemplateDTO,
   type LearnedTalentView,
+  type PartyStateMessage,
 } from "shared";
 
-type PanelKey = "chat" | "inventory" | "quests" | "stats" | "talents";
+type PanelKey = "chat" | "inventory" | "quests" | "stats" | "talents" | "party";
 
 const SLOT_LABELS: Record<EquipmentSlot, string> = {
   helmet: "Helmet",
@@ -32,6 +33,49 @@ function pickTargetSlot(slotType: ItemSlotType, equippedSlots: ReadonlySet<Equip
   return slotType;
 }
 
+// Must match .talent-node-icon's width/height and .talent-tier-row's gap in
+// index.html — used to size each tier row's CSS grid so a column means the
+// same horizontal position in every row.
+const TALENT_ICON_SIZE = 44;
+
+// Assigns every talent a column such that a talent shares its
+// prerequisite's column whenever possible (WoW-style: a chain runs straight
+// down), falling back to the next free column for anything that can't —
+// roots, or a second/third talent branching off the same prerequisite,
+// which would otherwise overlap in that tier's row. Columns are shared
+// across all tiers (never reused/reset per row), so column N lines up
+// vertically all the way down the tree.
+function assignTalentColumns(tiers: number[], byTier: Map<number, TalentTemplateDTO[]>): Map<string, number> {
+  const columnById = new Map<string, number>();
+  let nextFreeColumn = 0;
+
+  for (const tier of tiers) {
+    const talents = byTier.get(tier) ?? [];
+    const usedThisTier = new Set<number>();
+
+    // First pass: inherit the prerequisite's column where possible, so the
+    // first child of a talent lands directly beneath it.
+    for (const talent of talents) {
+      const parentCol = talent.prerequisiteId ? columnById.get(talent.prerequisiteId) : undefined;
+      if (parentCol === undefined || usedThisTier.has(parentCol)) continue;
+      columnById.set(talent.id, parentCol);
+      usedThisTier.add(parentCol);
+      nextFreeColumn = Math.max(nextFreeColumn, parentCol + 1);
+    }
+    // Second pass: everything left (roots, or a sibling whose parent's
+    // column was already claimed) gets the next unused column.
+    for (const talent of talents) {
+      if (columnById.has(talent.id)) continue;
+      while (usedThisTier.has(nextFreeColumn)) nextFreeColumn++;
+      columnById.set(talent.id, nextFreeColumn);
+      usedThisTier.add(nextFreeColumn);
+      nextFreeColumn++;
+    }
+  }
+
+  return columnById;
+}
+
 export interface InventoryHandlers {
   onEquip: (itemId: string, slot: EquipmentSlot) => void;
   onUnequip: (slot: EquipmentSlot) => void;
@@ -45,6 +89,16 @@ export interface AdminHandlers {
   onLevelTo10: () => void;
 }
 
+export interface OnlinePlayerView {
+  sessionId: string;
+  name: string;
+}
+
+export interface PartyHandlers {
+  onInvite: (targetSessionId: string) => void;
+  onLeave: () => void;
+}
+
 // defs is the class's full tree definition (content, fetched once via REST —
 // see net/api.ts's fetchTalents), while points/learned are the private,
 // server-pushed per-character progress (see TalentStateMessage) — this view
@@ -55,7 +109,14 @@ export interface TalentPanelData {
   defs: TalentTemplateDTO[];
 }
 
-const KEY_TO_PANEL: Record<string, PanelKey> = { c: "chat", i: "inventory", l: "quests", k: "stats", t: "talents" };
+const KEY_TO_PANEL: Record<string, PanelKey> = {
+  c: "chat",
+  i: "inventory",
+  l: "quests",
+  k: "stats",
+  t: "talents",
+  p: "party",
+};
 const DEFAULT_PANEL: PanelKey = "chat";
 
 // Placeholder body copy until each panel grows real content/state of its own.
@@ -65,7 +126,10 @@ const PANEL_PLACEHOLDER: Record<PanelKey, string> = {
   quests: "No active quests",
   stats: "Not in a game yet",
   talents: "Not in a game yet",
+  party: "Not in a game yet",
 };
+
+const EMPTY_PARTY_STATE: PartyStateMessage = { leaderSessionId: null, members: [] };
 
 export interface QuestLogEntry {
   questId: string;
@@ -128,6 +192,10 @@ export class Sidebar {
   private talentHandlers: TalentHandlers | null = null;
   private isAdmin = false;
   private adminHandlers: AdminHandlers | null = null;
+  private mySessionId = "";
+  private party: PartyStateMessage = EMPTY_PARTY_STATE;
+  private onlinePlayers: OnlinePlayerView[] = [];
+  private partyHandlers: PartyHandlers | null = null;
 
   constructor() {
     this.bodyEl = document.querySelector<HTMLElement>("#sidebar-body")!;
@@ -208,6 +276,27 @@ export class Sidebar {
     if (this.currentPanel === "stats") this.render();
   }
 
+  setMySessionId(sessionId: string) {
+    this.mySessionId = sessionId;
+  }
+
+  // Recomputed by the caller from room.state.players whenever it changes
+  // (join/leave) — this is the pool of people invitable to a party, so it
+  // needs to stay current even while the party panel isn't the active tab.
+  setOnlinePlayers(players: OnlinePlayerView[]) {
+    this.onlinePlayers = players;
+    if (this.currentPanel === "party") this.render();
+  }
+
+  setParty(party: PartyStateMessage) {
+    this.party = party;
+    if (this.currentPanel === "party") this.render();
+  }
+
+  setPartyHandlers(handlers: PartyHandlers) {
+    this.partyHandlers = handlers;
+  }
+
   private render() {
     this.bodyEl.innerHTML = "";
 
@@ -225,6 +314,10 @@ export class Sidebar {
     }
     if (this.currentPanel === "talents" && this.talents) {
       this.renderTalents(this.talents);
+      return;
+    }
+    if (this.currentPanel === "party" && this.mySessionId) {
+      this.renderParty();
       return;
     }
 
@@ -421,10 +514,11 @@ export class Sidebar {
   }
 
   // WoW-style tree: each talent is a square icon (name initials, hover for
-  // the full name/description/rank via a CSS-only tooltip) laid out one flex
-  // row per tier; a prerequisite relationship is drawn as a connecting line
-  // rather than spelled out in text, lit up once the prerequisite has a
-  // point in it.
+  // the full name/description/rank via a tooltip) laid out one row per
+  // tier, each row a CSS grid sharing the same column tracks (see
+  // assignTalentColumns) so a talent lines up directly under its
+  // prerequisite; the connecting line drawn between them is then a clean
+  // vertical (rather than a diagonal cutting across unrelated icons).
   private renderTalents(data: TalentPanelData) {
     const wrapper = document.createElement("div");
     wrapper.id = "talents-panel";
@@ -453,6 +547,10 @@ export class Sidebar {
     }
     const tiers = [...byTier.keys()].sort((a, b) => a - b);
 
+    const columnById = assignTalentColumns(tiers, byTier);
+    const totalColumns = Math.max(0, ...[...columnById.values()].map((c) => c + 1));
+    const gridTemplateColumns = `repeat(${totalColumns}, ${TALENT_ICON_SIZE}px)`;
+
     const tree = document.createElement("div");
     tree.id = "talent-tree";
 
@@ -469,6 +567,7 @@ export class Sidebar {
     for (const tier of tiers) {
       const row = document.createElement("div");
       row.className = "talent-tier-row";
+      row.style.gridTemplateColumns = gridTemplateColumns;
 
       for (const talent of byTier.get(tier) ?? []) {
         const rank = learnedRanks.get(talent.id) ?? 0;
@@ -480,6 +579,10 @@ export class Sidebar {
 
         const icon = document.createElement("div");
         icon.className = `talent-node-icon ${learnable ? "learnable" : maxed ? "maxed" : "locked"}`;
+        // grid-column is 1-indexed; the same column number in every tier
+        // row maps to the same CSS grid track (same gridTemplateColumns
+        // string), so column N is pixel-aligned across the whole tree.
+        icon.style.gridColumn = String((columnById.get(talent.id) ?? 0) + 1);
         icon.textContent = talent.name.slice(0, 2).toUpperCase();
         if (learnable) icon.addEventListener("click", () => this.talentHandlers?.onLearn(talent.id));
 
@@ -572,6 +675,81 @@ export class Sidebar {
         svg.appendChild(line);
       }
     });
+  }
+
+  private renderParty() {
+    const wrapper = document.createElement("div");
+    wrapper.id = "party-panel";
+
+    if (this.party.members.length > 0) {
+      const header = document.createElement("div");
+      header.id = "bag-header";
+      header.textContent = "Your Party";
+      wrapper.appendChild(header);
+
+      const roster = document.createElement("div");
+      roster.id = "party-roster";
+      for (const member of this.party.members) {
+        const row = document.createElement("div");
+        row.className = "bag-item";
+        const name = document.createElement("div");
+        name.className = "bag-item-name";
+        const isLeader = member.sessionId === this.party.leaderSessionId;
+        name.textContent = `${isLeader ? "★ " : ""}${member.name}`;
+        const desc = document.createElement("div");
+        desc.className = "bag-item-desc";
+        desc.textContent = `Lvl ${member.level} ${member.className}`;
+        row.append(name, desc);
+        roster.appendChild(row);
+      }
+      wrapper.appendChild(roster);
+
+      const leaveBtn = document.createElement("button");
+      leaveBtn.id = "party-leave-btn";
+      leaveBtn.textContent = "Leave Party";
+      leaveBtn.addEventListener("click", () => this.partyHandlers?.onLeave());
+      wrapper.appendChild(leaveBtn);
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "bag-empty";
+      empty.textContent = "Not in a party";
+      wrapper.appendChild(empty);
+    }
+
+    const listHeader = document.createElement("div");
+    listHeader.id = "bag-header";
+    listHeader.textContent = "Online Players";
+    wrapper.appendChild(listHeader);
+
+    const inPartySessionIds = new Set(this.party.members.map((m) => m.sessionId));
+    const invitable = this.onlinePlayers.filter((p) => p.sessionId !== this.mySessionId);
+
+    const list = document.createElement("div");
+    list.id = "bag-list";
+    if (invitable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "bag-empty";
+      empty.textContent = "No one else online";
+      list.appendChild(empty);
+    }
+    for (const player of invitable) {
+      const row = document.createElement("div");
+      row.className = "bag-item";
+      const name = document.createElement("div");
+      name.className = "bag-item-name";
+      name.textContent = player.name;
+      row.appendChild(name);
+      if (!inPartySessionIds.has(player.sessionId)) {
+        const button = document.createElement("button");
+        button.textContent = "Invite";
+        button.addEventListener("click", () => this.partyHandlers?.onInvite(player.sessionId));
+        row.appendChild(button);
+      }
+      list.appendChild(row);
+    }
+    wrapper.appendChild(list);
+
+    this.bodyEl.appendChild(wrapper);
   }
 }
 

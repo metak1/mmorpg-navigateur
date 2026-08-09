@@ -20,6 +20,7 @@ const BASE_FIELDS: FieldSpec[] = [
       { value: "heal", label: "Heal (self)" },
       { value: "slow", label: "Slow/Root" },
       { value: "groundAoe", label: "Ground AOE" },
+      { value: "interrupt", label: "Interrupt" },
     ],
   },
   {
@@ -62,8 +63,17 @@ function toInput(values: Record<string, string>): SpellTemplateInput {
     castTimeMs: Number(values.castTimeMs),
     color: Number(values.color),
     size: Number(values.size),
-    damage: kind === "heal" ? null : kind === "groundAoe" ? (groundAoeEffect === "damage" ? num("damage") : null) : num("damage"),
-    projectileSpeed: kind === "heal" || kind === "groundAoe" ? null : num("projectileSpeed"),
+    damage:
+      kind === "heal" || kind === "interrupt"
+        ? null
+        : kind === "groundAoe"
+          ? groundAoeEffect === "damage"
+            ? num("damage")
+            : null
+          : num("damage"),
+    projectileSpeed: kind === "heal" || kind === "groundAoe" || kind === "interrupt" ? null : num("projectileSpeed"),
+    // interrupt uses maxRange as its targeting distance — the one field it
+    // shares with everything else (see SpellDef.maxRange).
     maxRange: kind === "heal" ? null : num("maxRange"),
     aoeRadius: kind === "aoe" || kind === "groundAoe" ? num("aoeRadius") : null,
     slowMultiplier: kind === "slow" ? num("slowMultiplier") : null,
@@ -85,8 +95,8 @@ function updateFieldVisibility(form: HTMLFormElement) {
   };
 
   setVisible("groundAoeEffect", isGroundAoe);
-  setVisible("damage", isGroundAoe ? groundAoeEffect === "damage" : kind !== "heal");
-  setVisible("projectileSpeed", kind !== "heal" && !isGroundAoe);
+  setVisible("damage", isGroundAoe ? groundAoeEffect === "damage" : kind !== "heal" && kind !== "interrupt");
+  setVisible("projectileSpeed", kind !== "heal" && kind !== "interrupt" && !isGroundAoe);
   setVisible("maxRange", kind !== "heal");
   setVisible("aoeRadius", kind === "aoe" || isGroundAoe);
   setVisible("slowMultiplier", kind === "slow");

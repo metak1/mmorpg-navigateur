@@ -5,7 +5,7 @@ import { requireAdmin } from "./adminAuth.js";
 import { notifyContentChanged } from "../contentEvents.js";
 import { TileType } from "shared";
 import type { GameMapDTO, GameMapInput, ActiveMapResponse, MapTileDTO, MapTilesUpdateInput } from "shared";
-import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn } from "@prisma/client";
+import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn, MapPortal } from "@prisma/client";
 
 export const mapsRouter = Router();
 
@@ -17,7 +17,12 @@ export const mapsRouter = Router();
 const MAX_TILE_RANGE_CELLS = 128 * 128;
 
 function toDTO(
-  map: GameMap & { spawns: MonsterSpawn[]; npcSpawns: NpcSpawn[]; ambientSpawns: MapAmbientSpawn[] },
+  map: GameMap & {
+    spawns: MonsterSpawn[];
+    npcSpawns: NpcSpawn[];
+    ambientSpawns: MapAmbientSpawn[];
+    portals: MapPortal[];
+  },
 ): GameMapDTO {
   return {
     id: map.id,
@@ -28,12 +33,16 @@ function toDTO(
     isActive: map.isActive,
     ambientSpawnChance: map.ambientSpawnChance,
     cliffColor: map.cliffColor,
+    isDungeon: map.isDungeon,
+    minLevel: map.minLevel,
+    description: map.description,
     spawns: map.spawns.map((s) => ({
       id: s.id,
       mapId: s.mapId,
       monsterTemplateId: s.monsterTemplateId,
       x: s.x,
       y: s.y,
+      isBoss: s.isBoss,
     })),
     npcSpawns: map.npcSpawns.map((s) => ({
       id: s.id,
@@ -47,10 +56,16 @@ function toDTO(
       monsterTemplateId: a.monsterTemplateId,
       weight: a.weight,
     })),
+    portals: map.portals.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      targetMapId: p.targetMapId,
+    })),
   };
 }
 
-const MAP_INCLUDE = { spawns: true, npcSpawns: true, ambientSpawns: true } as const;
+const MAP_INCLUDE = { spawns: true, npcSpawns: true, ambientSpawns: true, portals: true } as const;
 
 mapsRouter.get(
   "/",
@@ -167,9 +182,13 @@ mapsRouter.post(
         spawnY: body.spawnY,
         ambientSpawnChance: body.ambientSpawnChance,
         cliffColor: body.cliffColor,
+        isDungeon: body.isDungeon,
+        minLevel: body.minLevel,
+        description: body.description,
         spawns: { create: body.spawns },
         npcSpawns: { create: body.npcSpawns },
         ambientSpawns: { create: body.ambientSpawns },
+        portals: { create: body.portals },
       },
       include: MAP_INCLUDE,
     });
@@ -189,6 +208,7 @@ mapsRouter.put(
       await tx.monsterSpawn.deleteMany({ where: { mapId: id } });
       await tx.npcSpawn.deleteMany({ where: { mapId: id } });
       await tx.mapAmbientSpawn.deleteMany({ where: { mapId: id } });
+      await tx.mapPortal.deleteMany({ where: { mapId: id } });
       return tx.gameMap.update({
         where: { id },
         data: {
@@ -198,9 +218,13 @@ mapsRouter.put(
           spawnY: body.spawnY,
           ambientSpawnChance: body.ambientSpawnChance,
           cliffColor: body.cliffColor,
+          isDungeon: body.isDungeon,
+          minLevel: body.minLevel,
+          description: body.description,
           spawns: { create: body.spawns },
           npcSpawns: { create: body.npcSpawns },
           ambientSpawns: { create: body.ambientSpawns },
+          portals: { create: body.portals },
         },
         include: MAP_INCLUDE,
       });

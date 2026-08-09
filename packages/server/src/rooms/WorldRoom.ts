@@ -1,4 +1,4 @@
-import { Room, Client, type Delayed } from "@colyseus/core";
+import { Room, Client, matchMaker, type Delayed } from "@colyseus/core";
 import { prisma } from "../db.js";
 import { onContentChanged } from "../contentEvents.js";
 import { verifyToken } from "../auth/jwt.js";
@@ -19,9 +19,12 @@ import {
   Monster,
   Projectile,
   Npc,
+  Portal,
   QuestProgress,
   RoomState,
   WORLD_ROOM,
+  DUNGEON_ROOM,
+  MAX_PARTY_SIZE,
   MOVE_SPEED,
   resolveMovement,
   getTileAt,
@@ -68,6 +71,21 @@ import {
   type TalentStateMessage,
   type AdminSetLevelMessage,
   type TalentSpellParam,
+  type TalentMechanicFlag,
+  type InvitePartyMessage,
+  type RespondPartyInviteMessage,
+  type LeavePartyMessage,
+  type PartyActionFailedMessage,
+  type PartyInviteReceivedMessage,
+  type PartyMemberView,
+  type PartyStateMessage,
+  type UsePortalMessage,
+  type PortalFailedMessage,
+  type PortalGrantedMessage,
+  type DungeonClearedMessage,
+  type DungeonPromptMessage,
+  type EnterDungeonMessage,
+  PORTAL_INTERACT_RANGE,
   type EquipmentSlot,
   type ItemSlotType,
   type ItemRarity,
@@ -103,7 +121,50 @@ interface MonsterRuntime {
   slowUntil: number;
   slowMultiplier: number;
   lastAttackAt: number;
+  // Independent of lastAttackAt (melee) — a monster with a ranged spell
+  // configured (see MonsterTemplate.spellDamage etc.) has the two on
+  // separate cooldowns, same as a player's per-spell cooldown vs GCD.
+  lastSpellCastAt: number;
   template: MonsterTemplateWithDrops;
+  // Marks this specific placement (not the template) as a dungeon's boss —
+  // see MonsterSpawn.isBoss. Killing it broadcasts DungeonClearedMessage
+  // (see damageMonster). Preserved across respawns (though respawn is
+  // itself disabled for the whole duration of a dungeon instance — see
+  // isDungeonInstance).
+  isBoss: boolean;
+}
+
+// Room-creation options (see WorldRoom.handleUsePortal, which is the only
+// caller of matchMaker.createRoom(DUNGEON_ROOM, {...})). Left both
+// undefined for the plain overworld case (WORLD_ROOM, joined via ordinary
+// joinOrCreate) — mapId then falls back to querying the active map, and no
+// character-allowlist check applies.
+interface WorldRoomOptions {
+  mapId?: string;
+  allowedCharacterIds?: string[];
+  // The map a dungeon instance's exit portal should lead back to — the map
+  // whose portal was used to create this instance (see handleUsePortal),
+  // not necessarily "the" overworld map, since nothing rules out a dungeon
+  // being entered from another dungeon. Undefined for the plain overworld
+  // room, where no exit portal is ever spawned.
+  returnMapId?: string;
+}
+
+interface PortalRuntime {
+  targetMapId: string;
+}
+
+// One in-flight monster ranged-spell cast, keyed by monster id — mirrors
+// the player-side castTimeouts/castingUntil pair, just scoped per-monster
+// instead of per-session since several monsters can be casting at once.
+interface MonsterCastRuntime {
+  timeout: Delayed;
+  targetSessionId: string;
+}
+
+interface Party {
+  leaderSessionId: string;
+  memberSessionIds: string[];
 }
 
 interface NpcRuntime {
@@ -193,9 +254,32 @@ export class WorldRoom extends Room<RoomState> {
   // commands. Not itself sent to any client.
   private isAdmin = new Map<string, boolean>();
   private monsterRuntime = new Map<string, MonsterRuntime>();
+  private monsterCastRuntime = new Map<string, MonsterCastRuntime>();
   private npcRuntime = new Map<string, NpcRuntime>();
+  private portalRuntime = new Map<string, PortalRuntime>();
   private projectileRuntime = new Map<string, ProjectileRuntime>();
   private projectileSeq = 0;
+
+  // True for a dungeon instance (created via matchMaker.createRoom with
+  // allowedCharacterIds — see handleUsePortal), false for the plain
+  // overworld room. Gates: which characters may onJoin, whether a player
+  // spawns at their persisted overworld position vs the map's spawn point,
+  // whether onLeave persists x/y back to Character, whether ambient
+  // spawning runs at all, and whether a dead monster respawns.
+  private isDungeonInstance = false;
+  private allowedCharacterIds?: Set<string>;
+  // See WorldRoomOptions.returnMapId — where a dungeon's dynamically-spawned
+  // exit portal (see damageMonster's dungeonCleared branch) leads.
+  private returnMapId?: string;
+  // Guards against spawning a second exit portal if a dungeon has more than
+  // one boss-flagged monster — the dungeon only needs to be "cleared" once.
+  private exitPortalSpawned = false;
+  // In-memory only — parties are session-scoped, not persisted, and every
+  // overworld player already shares this one room instance, so no cross-
+  // room presence infrastructure is needed for them to find each other.
+  private parties = new Map<string, Party>();
+  private partyIdBySession = new Map<string, string>();
+  private partySeq = 0;
 
   // Built once in onCreate (map.id isn't known before then) — every
   // collision/LoS/prediction call site below reads through this rather than
@@ -241,18 +325,28 @@ export class WorldRoom extends Room<RoomState> {
   private talentBonus = new Map<string, StatBonusSplit>();
   private unsubscribeContentEvents?: () => void;
 
-  async onCreate() {
+  async onCreate(options: WorldRoomOptions = {}) {
     this.setState(new RoomState());
 
-    const map = await prisma.gameMap.findFirst({ where: { isActive: true } });
+    // The plain overworld room (WORLD_ROOM, joined via ordinary
+    // joinOrCreate) always loads whichever map is flagged active; a dungeon
+    // instance (DUNGEON_ROOM, only ever created explicitly by
+    // handleUsePortal's matchMaker.createRoom call) loads a specific map by
+    // id instead and restricts who may onJoin.
+    const map = options.mapId
+      ? await prisma.gameMap.findUnique({ where: { id: options.mapId } })
+      : await prisma.gameMap.findFirst({ where: { isActive: true } });
     if (!map) {
       throw new Error("No active map found in the database. Run `npx prisma db seed` in packages/server.");
     }
 
+    this.isDungeonInstance = options.allowedCharacterIds !== undefined;
+    this.allowedCharacterIds = options.allowedCharacterIds ? new Set(options.allowedCharacterIds) : undefined;
+    this.returnMapId = options.returnMapId;
+
     this.mapId = map.id;
     this.spawnX = map.spawnX;
     this.spawnY = map.spawnY;
-    this.ambientSpawnChance = map.ambientSpawnChance;
     this.chunkCache = new ChunkTileCache(map.tileSize, async (minCol, minRow, maxCol, maxRow) => {
       const rows = await prisma.mapTile.findMany({
         where: { mapId: map.id, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
@@ -270,7 +364,12 @@ export class WorldRoom extends Room<RoomState> {
     const templateRows = await prisma.monsterTemplate.findMany({ include: { drops: true } });
     this.monsterTemplatesById = new Map(templateRows.map((t) => [t.id, t]));
 
-    this.ambientSpawnRules = await prisma.mapAmbientSpawn.findMany({ where: { mapId: map.id } });
+    // No procedural spawning inside a dungeon instance — ambientSpawnChance
+    // stays 0 and ambientSpawnRules stays empty (its field default).
+    if (!this.isDungeonInstance) {
+      this.ambientSpawnChance = map.ambientSpawnChance;
+      this.ambientSpawnRules = await prisma.mapAmbientSpawn.findMany({ where: { mapId: map.id } });
+    }
 
     this.unsubscribeContentEvents = onContentChanged((kind) => {
       if (kind === "spells") void this.reloadSpells();
@@ -287,7 +386,7 @@ export class WorldRoom extends Room<RoomState> {
       include: { monsterTemplate: { include: { drops: true } } },
     });
     spawnRows.forEach((spawn, index) => {
-      this.spawnMonster(`monster-${index}`, { x: spawn.x, y: spawn.y }, spawn.monsterTemplate);
+      this.spawnMonster(`monster-${index}`, { x: spawn.x, y: spawn.y }, spawn.monsterTemplate, spawn.isBoss);
     });
 
     const npcSpawnRows = await prisma.npcSpawn.findMany({
@@ -296,6 +395,17 @@ export class WorldRoom extends Room<RoomState> {
     });
     npcSpawnRows.forEach((spawn, index) => {
       this.spawnNpc(`npc-${index}`, { x: spawn.x, y: spawn.y }, spawn.npcTemplate);
+    });
+
+    const portalRows = await prisma.mapPortal.findMany({ where: { mapId: map.id } });
+    portalRows.forEach((row, index) => {
+      const id = `portal-${index}`;
+      const portal = new Portal();
+      portal.id = id;
+      portal.x = row.x;
+      portal.y = row.y;
+      this.state.portals.set(id, portal);
+      this.portalRuntime.set(id, { targetMapId: row.targetMapId });
     });
 
     this.onMessage("move", (client, message: MoveInputMessage) => {
@@ -311,6 +421,13 @@ export class WorldRoom extends Room<RoomState> {
     this.onMessage("unequipItem", (client, message: UnequipItemMessage) => void this.handleUnequipItem(client, message));
     this.onMessage("learnTalent", (client, message: LearnTalentMessage) => void this.handleLearnTalent(client, message));
     this.onMessage("adminSetLevel", (client, message: AdminSetLevelMessage) => void this.handleAdminSetLevel(client, message));
+    this.onMessage("inviteParty", (client, message: InvitePartyMessage) => this.handleInviteParty(client, message));
+    this.onMessage("respondPartyInvite", (client, message: RespondPartyInviteMessage) =>
+      this.handleRespondPartyInvite(client, message),
+    );
+    this.onMessage("leaveParty", (client: Client, _message: LeavePartyMessage) => this.handleLeaveParty(client));
+    this.onMessage("usePortal", (client, message: UsePortalMessage) => void this.handleUsePortal(client, message));
+    this.onMessage("enterDungeon", (client, message: EnterDungeonMessage) => void this.handleEnterDungeon(client, message));
 
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_INTERVAL_MS);
   }
@@ -397,6 +514,7 @@ export class WorldRoom extends Room<RoomState> {
   // across the whole already-explored world and duplicate monsters.
   private async reloadMapContent() {
     this.chunkCache.clear();
+    if (this.isDungeonInstance) return; // no ambient spawning to reload; terrain re-fetches lazily either way
     const [map, ambientRows] = await Promise.all([
       prisma.gameMap.findUnique({ where: { id: this.mapId } }),
       prisma.mapAmbientSpawn.findMany({ where: { mapId: this.mapId } }),
@@ -535,7 +653,7 @@ export class WorldRoom extends Room<RoomState> {
     this.npcRuntime.set(id, { npcTemplateId: template.id });
   }
 
-  private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplateWithDrops) {
+  private spawnMonster(id: string, spawn: { x: number; y: number }, template: MonsterTemplateWithDrops, isBoss = false) {
     const monster = new Monster();
     monster.id = id;
     monster.name = template.name;
@@ -556,6 +674,8 @@ export class WorldRoom extends Room<RoomState> {
       slowUntil: 0,
       slowMultiplier: 1,
       lastAttackAt: 0,
+      lastSpellCastAt: 0,
+      isBoss,
       template,
     });
   }
@@ -658,6 +778,25 @@ export class WorldRoom extends Room<RoomState> {
         this.lastCastAt.set(cooldownKey, this.clock.currentTime);
       } else {
         client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
+      }
+      return;
+    }
+
+    if (spell.kind === "interrupt") {
+      const interruptTarget = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
+      if (!interruptTarget || !hasLineOfSight(this.chunkCache, player.x, player.y, interruptTarget.x, interruptTarget.y)) {
+        client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
+        return;
+      }
+      // Cooldown is spent whether or not the monster was actually casting —
+      // a "whiffed" interrupt still costs its cooldown, same as every real
+      // MMO interrupt ability. No dedicated success/failure message: the
+      // monster's cast bar disappearing (or never having appeared) is the
+      // feedback, matching how other LOS/range rejections this session
+      // avoided adding a new toast where an existing visual already says it.
+      this.lastCastAt.set(cooldownKey, this.clock.currentTime);
+      if (message.targetId && this.monsterCastRuntime.has(message.targetId)) {
+        this.interruptMonsterCast(message.targetId);
       }
       return;
     }
@@ -792,6 +931,9 @@ export class WorldRoom extends Room<RoomState> {
     for (const [id, monster] of this.state.monsters) {
       const runtime = this.monsterRuntime.get(id);
       if (!runtime) continue;
+      // Standing still, channeling — resolution (resolveMonsterCast) or an
+      // interrupt (interruptMonsterCast) is what ends this, not this loop.
+      if (this.monsterCastRuntime.has(id)) continue;
       const template = runtime.template;
 
       let target: Player | null = null;
@@ -809,6 +951,33 @@ export class WorldRoom extends Room<RoomState> {
       const speedMultiplier = isSlowed ? runtime.slowMultiplier : 1;
 
       if (target) {
+        // A monster with a ranged spell configured (see MonsterTemplate.
+        // spellDamage etc. — all five are set together or not at all)
+        // prefers it over melee whenever it's off cooldown and the target
+        // is in range/LOS, same gating the melee attack below already uses.
+        // Starting a cast doesn't land damage immediately — see
+        // resolveMonsterCast, scheduled for spellCastTimeMs from now, which
+        // is exactly the window the new per-class interrupt spell can act in.
+        const hasSpell =
+          template.spellDamage != null &&
+          template.spellRange != null &&
+          template.spellCastTimeMs != null &&
+          template.spellCooldownMs != null;
+        const canCastSpell =
+          hasSpell &&
+          targetDist <= template.spellRange! &&
+          now - runtime.lastSpellCastAt >= template.spellCooldownMs! &&
+          hasLineOfSight(this.chunkCache, monster.x, monster.y, target.x, target.y);
+
+        if (canCastSpell) {
+          runtime.lastSpellCastAt = now;
+          monster.casting = true;
+          monster.castDurationMs = template.spellCastTimeMs!;
+          const timeout = this.clock.setTimeout(() => this.resolveMonsterCast(id), template.spellCastTimeMs!);
+          this.monsterCastRuntime.set(id, { timeout, targetSessionId: target.sessionId });
+          continue;
+        }
+
         // In-range alone isn't enough to land a hit — attackRange is a flat
         // XY distance, so without also requiring line-of-sight a monster
         // stuck at the base of a cliff or behind a wall could keep hitting
@@ -860,6 +1029,48 @@ export class WorldRoom extends Room<RoomState> {
     }
   }
 
+  // Runs after a monster's ranged-spell channel finishes uninterrupted.
+  // Re-reads monster/target state at resolution time (the same "things may
+  // have moved since the cast started" re-check resolveCastEffect does for
+  // players) — a target that died, disconnected, or wandered out of range/
+  // LOS makes the cast fizzle silently rather than landing an unfair hit.
+  private resolveMonsterCast(id: string) {
+    const runtime = this.monsterRuntime.get(id);
+    const castRuntime = this.monsterCastRuntime.get(id);
+    const monster = this.state.monsters.get(id);
+    this.monsterCastRuntime.delete(id);
+    if (monster) {
+      monster.casting = false;
+      monster.castDurationMs = 0;
+    }
+    if (!runtime || !castRuntime || !monster) return;
+
+    const target = this.state.players.get(castRuntime.targetSessionId);
+    if (!target) return;
+    const dist = Math.hypot(target.x - monster.x, target.y - monster.y);
+    const template = runtime.template;
+    if (dist > (template.spellRange ?? 0) || !hasLineOfSight(this.chunkCache, monster.x, monster.y, target.x, target.y)) return;
+
+    this.damagePlayer(target, template.spellDamage ?? 0);
+  }
+
+  // The counterpart to a player's interrupt spell (see resolveCastEffect's
+  // "interrupt" branch) — cancels an in-progress monster cast with no bonus
+  // lockout beyond the spell's own cooldown (already spent the moment the
+  // cast started, at lastSpellCastAt, same as a player's GCD being spent on
+  // accept rather than on success).
+  private interruptMonsterCast(id: string) {
+    const castRuntime = this.monsterCastRuntime.get(id);
+    if (!castRuntime) return;
+    castRuntime.timeout.clear();
+    this.monsterCastRuntime.delete(id);
+    const monster = this.state.monsters.get(id);
+    if (monster) {
+      monster.casting = false;
+      monster.castDurationMs = 0;
+    }
+  }
+
   // Rolls a caster's primary-stat bonus + crit chance for a spell's base
   // damage/heal magnitude. Falls back to the unmodified base if the caster
   // has already left (their entry in characterStats is gone) — a projectile
@@ -890,16 +1101,31 @@ export class WorldRoom extends Room<RoomState> {
     monster.hp -= applyArmor(amount, runtime?.template.armor ?? 0);
     if (monster.hp <= 0) {
       this.state.monsters.delete(id);
+      // A dead monster can't still be mid-cast — without this, a stray
+      // scheduled resolveMonsterCast(id) could fire later against a
+      // respawned monster reusing the same id (only possible if
+      // spellCastTimeMs ever exceeded MONSTER_RESPAWN_MS, but cheap to rule
+      // out entirely rather than rely on that never happening).
+      this.interruptMonsterCast(id);
       if (runtime) {
         if (casterSessionId) {
           void this.grantXp(casterSessionId, runtime.template.xpReward);
           void this.trackMonsterKill(casterSessionId, runtime.template.id);
           void this.grantDrops(casterSessionId, runtime.template);
         }
-        this.clock.setTimeout(
-          () => this.spawnMonster(id, { x: runtime.homeX, y: runtime.homeY }, runtime.template),
-          MONSTER_RESPAWN_MS,
-        );
+        if (runtime.isBoss) {
+          this.broadcast("dungeonCleared", {} satisfies DungeonClearedMessage);
+          this.spawnExitPortal(monster.x, monster.y);
+        }
+        // No respawn for the lifetime of a dungeon instance — a fresh
+        // instance (with fresh monsters) is created the next time a party
+        // enters, rather than trash mobs ever coming back mid-run.
+        if (!this.isDungeonInstance) {
+          this.clock.setTimeout(
+            () => this.spawnMonster(id, { x: runtime.homeX, y: runtime.homeY }, runtime.template, runtime.isBoss),
+            MONSTER_RESPAWN_MS,
+          );
+        }
       }
     }
   }
@@ -962,6 +1188,247 @@ export class WorldRoom extends Room<RoomState> {
 
     await this.grantXp(sessionId, neededXp);
     this.sendTalentState(client);
+  }
+
+  // --- Party system ---
+  // In-memory only (see the `parties`/`partyIdBySession` field comments) —
+  // no DB persistence, a party dissolves when the room does or when
+  // everyone leaves it.
+
+  private handleInviteParty(client: Client, message: InvitePartyMessage) {
+    const sessionId = client.sessionId;
+    const inviter = this.state.players.get(sessionId);
+    const target = this.state.players.get(message.targetSessionId);
+    if (!inviter || !target || sessionId === message.targetSessionId) return;
+
+    const myPartyId = this.partyIdBySession.get(sessionId);
+    const myParty = myPartyId ? this.parties.get(myPartyId) : undefined;
+    if (myParty && myParty.memberSessionIds.length >= MAX_PARTY_SIZE) {
+      client.send("partyActionFailed", { reason: "Your party is full." } satisfies PartyActionFailedMessage);
+      return;
+    }
+    // Only the leader invites once a party already exists — otherwise any
+    // member inviting past the cap would need the same capacity re-check
+    // the leader already has to do, for no real benefit at this scope.
+    if (myParty && myParty.leaderSessionId !== sessionId) {
+      client.send("partyActionFailed", { reason: "Only the party leader can invite." } satisfies PartyActionFailedMessage);
+      return;
+    }
+    if (this.partyIdBySession.has(message.targetSessionId)) {
+      client.send("partyActionFailed", { reason: `${target.name} is already in a party.` } satisfies PartyActionFailedMessage);
+      return;
+    }
+
+    this.clients.getById(message.targetSessionId)?.send("partyInviteReceived", {
+      fromSessionId: sessionId,
+      fromName: inviter.name,
+    } satisfies PartyInviteReceivedMessage);
+  }
+
+  private handleRespondPartyInvite(client: Client, message: RespondPartyInviteMessage) {
+    const sessionId = client.sessionId;
+    if (!message.accept) return;
+    if (this.partyIdBySession.has(sessionId)) return; // already in a party since the invite was sent
+
+    const inviter = this.state.players.get(message.fromSessionId);
+    const responder = this.state.players.get(sessionId);
+    if (!inviter || !responder) return;
+
+    let partyId = this.partyIdBySession.get(message.fromSessionId);
+    if (!partyId) {
+      // Inviter wasn't in a party yet either — this invite forms a brand
+      // new one with them as leader.
+      partyId = `party-${this.partySeq++}`;
+      this.parties.set(partyId, { leaderSessionId: message.fromSessionId, memberSessionIds: [message.fromSessionId] });
+      this.partyIdBySession.set(message.fromSessionId, partyId);
+    }
+    const party = this.parties.get(partyId);
+    if (!party) return;
+    if (party.memberSessionIds.length >= MAX_PARTY_SIZE) {
+      client.send("partyActionFailed", { reason: "That party is full." } satisfies PartyActionFailedMessage);
+      return;
+    }
+
+    party.memberSessionIds.push(sessionId);
+    this.partyIdBySession.set(sessionId, partyId);
+    this.broadcastPartyState(partyId);
+  }
+
+  private handleLeaveParty(client: Client) {
+    const partyId = this.partyIdBySession.get(client.sessionId);
+    if (partyId) this.removeFromParty(client.sessionId, partyId);
+  }
+
+  // Also the disconnect-cleanup path (see onLeave) — a departing member
+  // both leaves their party AND (if anyone's left) promotes a new leader
+  // and notifies the rest, same as an explicit leaveParty.
+  private removeFromParty(sessionId: string, partyId: string) {
+    const party = this.parties.get(partyId);
+    if (!party) return;
+    party.memberSessionIds = party.memberSessionIds.filter((id) => id !== sessionId);
+    this.partyIdBySession.delete(sessionId);
+    this.clients
+      .getById(sessionId)
+      ?.send("partyState", { leaderSessionId: null, members: [] } satisfies PartyStateMessage);
+
+    if (party.memberSessionIds.length === 0) {
+      this.parties.delete(partyId);
+      return;
+    }
+    if (party.leaderSessionId === sessionId) {
+      party.leaderSessionId = party.memberSessionIds[0];
+    }
+    this.broadcastPartyState(partyId);
+  }
+
+  private broadcastPartyState(partyId: string) {
+    const party = this.parties.get(partyId);
+    if (!party) return;
+    const members: PartyMemberView[] = party.memberSessionIds.map((sessionId) => {
+      const player = this.state.players.get(sessionId);
+      return { sessionId, name: player?.name ?? "?", level: player?.level ?? 1, className: player?.className ?? "?" };
+    });
+    const message: PartyStateMessage = { leaderSessionId: party.leaderSessionId, members };
+    for (const memberSessionId of party.memberSessionIds) {
+      this.clients.getById(memberSessionId)?.send("partyState", message);
+    }
+  }
+
+  // --- Portals / dungeons ---
+
+  // Resolves the portal, the sender's party (solo = a "party" of just
+  // themselves — no party required to use a portal), and the target map's
+  // level gate, then explicitly creates a fresh dungeon room instance
+  // (rather than letting each member matchmake independently) so the whole
+  // group lands in the same one. Every member's client gets the resulting
+  // roomId, not just whoever clicked the portal.
+  // Called once, right where the dungeon's boss died, so players don't have
+  // to retrace their steps back to a hand-placed entry portal (and dungeons
+  // don't strictly need one authored on their map at all — see
+  // WorldRoomOptions.returnMapId). Reuses the exact same portalRuntime /
+  // usePortal plumbing a map-authored portal goes through, so leaving via it
+  // works identically to entering: handleUsePortal already treats "target
+  // map isn't a dungeon" as "just rejoin the plain overworld room."
+  private spawnExitPortal(x: number, y: number) {
+    if (this.exitPortalSpawned || !this.returnMapId) return;
+    this.exitPortalSpawned = true;
+
+    const id = "exit-portal";
+    const portal = new Portal();
+    portal.id = id;
+    portal.x = x;
+    portal.y = y;
+    this.state.portals.set(id, portal);
+    this.portalRuntime.set(id, { targetMapId: this.returnMapId });
+  }
+
+  // Shared by handleUsePortal and handleEnterDungeon: looks up the portal
+  // and its target map, rejecting (with a portalFailed reason sent to the
+  // client) if the player is out of range or the portal is misconfigured.
+  // Both callers need this — a dungeon portal is validated once when the
+  // prompt is requested and again when entry is actually confirmed, since
+  // the client can't be trusted to only ever send EnterDungeonMessage after
+  // a genuine DungeonPromptMessage.
+  private async resolvePortalTarget(client: Client, portalId: string) {
+    const sessionId = client.sessionId;
+    const player = this.state.players.get(sessionId);
+    const portal = this.state.portals.get(portalId);
+    const portalRuntime = this.portalRuntime.get(portalId);
+    if (!player || !portal || !portalRuntime) return undefined;
+
+    if (Math.hypot(player.x - portal.x, player.y - portal.y) > PORTAL_INTERACT_RANGE) {
+      client.send("portalFailed", { reason: "You need to be closer to the portal." } satisfies PortalFailedMessage);
+      return undefined;
+    }
+
+    const targetMap = await prisma.gameMap.findUnique({ where: { id: portalRuntime.targetMapId } });
+    if (!targetMap) {
+      client.send("portalFailed", { reason: "That portal leads nowhere." } satisfies PortalFailedMessage);
+      return undefined;
+    }
+
+    return { player, targetMap };
+  }
+
+  private async handleUsePortal(client: Client, message: UsePortalMessage) {
+    const resolved = await this.resolvePortalTarget(client, message.portalId);
+    if (!resolved) return;
+    const { targetMap } = resolved;
+
+    // A portal leading to a non-dungeon map (the overworld, or a return
+    // portal on a dungeon map pointing back to it) doesn't create a new
+    // restricted instance at all, and there's nothing to confirm about
+    // leaving — the client just rejoins the plain overworld room via
+    // ordinary matchmaking (see joinRoomById vs connectToWorld), landing
+    // back in the one shared instance everyone else uses. No roomId means
+    // exactly that.
+    if (!targetMap.isDungeon) {
+      const sessionId = client.sessionId;
+      const partyId = this.partyIdBySession.get(sessionId);
+      const memberSessionIds = partyId ? (this.parties.get(partyId)?.memberSessionIds ?? [sessionId]) : [sessionId];
+      const granted: PortalGrantedMessage = { mapId: targetMap.id };
+      for (const memberSessionId of memberSessionIds) {
+        this.clients.getById(memberSessionId)?.send("portalGranted", granted);
+      }
+      return;
+    }
+
+    // A dungeon target isn't entered immediately — the client shows a
+    // confirmation screen (description, level requirement, party roster/
+    // invite) first, only actually creating/joining the instance once the
+    // player confirms via EnterDungeonMessage (handleEnterDungeon).
+    client.send("dungeonPrompt", {
+      portalId: message.portalId,
+      mapId: targetMap.id,
+      name: targetMap.name,
+      description: targetMap.description,
+      minLevel: targetMap.minLevel,
+    } satisfies DungeonPromptMessage);
+  }
+
+  private async handleEnterDungeon(client: Client, message: EnterDungeonMessage) {
+    const resolved = await this.resolvePortalTarget(client, message.portalId);
+    if (!resolved) return;
+    const { targetMap } = resolved;
+    if (!targetMap.isDungeon) return; // only a dungeonPrompt ever offers this action
+
+    const sessionId = client.sessionId;
+    const partyId = this.partyIdBySession.get(sessionId);
+    const memberSessionIds = partyId ? (this.parties.get(partyId)?.memberSessionIds ?? [sessionId]) : [sessionId];
+
+    for (const memberSessionId of memberSessionIds) {
+      const memberLevel = this.characterStats.get(memberSessionId)?.level ?? 0;
+      if (memberLevel < targetMap.minLevel) {
+        const memberName = this.state.players.get(memberSessionId)?.name ?? "A party member";
+        client.send("portalFailed", {
+          reason: `${memberName} must be at least level ${targetMap.minLevel} to enter.`,
+        } satisfies PortalFailedMessage);
+        return;
+      }
+    }
+
+    const allowedCharacterIds = memberSessionIds
+      .map((memberSessionId) => this.characterIds.get(memberSessionId))
+      .filter((characterId): characterId is string => characterId !== undefined);
+
+    let roomId: string;
+    try {
+      const room = await matchMaker.createRoom(DUNGEON_ROOM, {
+        mapId: targetMap.id,
+        allowedCharacterIds,
+        returnMapId: this.mapId,
+      } satisfies WorldRoomOptions);
+      roomId = room.roomId;
+    } catch (err) {
+      console.error("Failed to create dungeon instance:", err);
+      client.send("portalFailed", { reason: "Could not open that instance right now." } satisfies PortalFailedMessage);
+      return;
+    }
+
+    const granted: PortalGrantedMessage = { roomId, mapId: targetMap.id };
+    for (const memberSessionId of memberSessionIds) {
+      this.clients.getById(memberSessionId)?.send("portalGranted", granted);
+    }
   }
 
   // Rolls a monster's loot table independently per entry (so a single kill
@@ -1159,6 +1626,23 @@ export class WorldRoom extends Room<RoomState> {
       }
     }
     return applyPercent(base + flat, percent);
+  }
+
+  // The check every bespoke mechanic-flag talent's gameplay code should gate
+  // on — true if this session has learned any talent carrying a
+  // mechanicFlag effect named `flagName` (see TALENT_MECHANIC_FLAGS in
+  // shared/src/api-types.ts for the fixed set of names an admin can attach
+  // to a talent). mechanicFlag effects have no numeric value/rank to read —
+  // a talent either has the flag or doesn't, so this is a plain boolean,
+  // unlike getSpellValue/loadTalentBonus which accumulate magnitudes.
+  private hasMechanicFlag(sessionId: string, flagName: TalentMechanicFlag): boolean {
+    const learned = this.learnedTalents.get(sessionId);
+    if (!learned) return false;
+    for (const talentId of learned.keys()) {
+      const talent = this.talentTemplatesById.get(talentId);
+      if (talent?.effects.some((e) => e.effectType === "mechanicFlag" && e.flagName === flagName)) return true;
+    }
+    return false;
   }
 
   private sendTalentState(client: Client) {
@@ -1693,6 +2177,12 @@ export class WorldRoom extends Room<RoomState> {
     if (!character.class) {
       throw new Error(`Character "${character.name}" has no class assigned.`);
     }
+    // Defense in depth alongside the seat reservation itself — only
+    // characters the portal actually granted entry to may join a dungeon
+    // instance (see handleUsePortal).
+    if (this.allowedCharacterIds && !this.allowedCharacterIds.has(character.id)) {
+      throw new Error("You don't have access to this dungeon instance.");
+    }
 
     const stats: CombatStats = {
       level: character.level,
@@ -1712,8 +2202,11 @@ export class WorldRoom extends Room<RoomState> {
     const player = new Player();
     player.sessionId = client.sessionId;
     player.name = character.name;
-    player.x = character.x;
-    player.y = character.y;
+    // A dungeon instance's coordinate space has nothing to do with the
+    // character's persisted overworld position — spawn at the (dungeon)
+    // map's own spawn point instead, same as a brand-new character would.
+    player.x = this.isDungeonInstance ? this.spawnX : character.x;
+    player.y = this.isDungeonInstance ? this.spawnY : character.y;
     player.classId = character.class.id;
     player.className = character.class.name;
     player.level = character.level;
@@ -1775,14 +2268,18 @@ export class WorldRoom extends Room<RoomState> {
     for (let spellId = 1; spellId <= 6; spellId++) {
       this.lastCastAt.delete(`${client.sessionId}:${spellId}`);
     }
+    const partyId = this.partyIdBySession.get(client.sessionId);
+    if (partyId) this.removeFromParty(client.sessionId, partyId);
 
     if (player && characterId) {
       try {
         await prisma.character.update({
           where: { id: characterId },
           data: {
-            x: player.x,
-            y: player.y,
+            // A dungeon instance's x/y is meaningless in the overworld's
+            // coordinate space — writing it here would corrupt the
+            // character's real position. Only the overworld room persists it.
+            ...(!this.isDungeonInstance && { x: player.x, y: player.y }),
             ...(stats && {
               level: stats.level,
               experience: stats.experience,

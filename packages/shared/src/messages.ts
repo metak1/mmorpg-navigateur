@@ -2,6 +2,15 @@ import type { SpellId } from "./spells.js";
 import type { EquipmentSlot, ItemRarity, ItemSlotType } from "./api-types.js";
 
 export const WORLD_ROOM = "world";
+// Registered against the exact same WorldRoom class as WORLD_ROOM (see
+// packages/server/src/index.ts) — a dungeon instance is a WorldRoom created
+// with mapId/allowedCharacterIds room options rather than a separate room
+// implementation, so it inherits every existing system (combat, spells,
+// quests, inventory, talents) for free. The two names exist so overworld
+// clients can never accidentally matchmake into a dungeon instance via
+// plain joinOrCreate — dungeon instances are only ever reached via an
+// explicit server-issued roomId (see PortalGrantedMessage).
+export const DUNGEON_ROOM = "dungeon";
 export const MOVE_SPEED = 200; // px/sec
 
 // Options sent when joining the world room. The session token is issued by
@@ -213,4 +222,112 @@ export interface TalentStateMessage {
 // loot-table entry that rolled successfully (may be empty).
 export interface LootDroppedMessage {
   drops: Array<{ itemId: string; name: string; color: number; rarity: ItemRarity; quantity: number }>;
+}
+
+// --- Party system ---
+// Lives entirely as extra state/messages on WorldRoom rather than a
+// separate service — every overworld player is already colocated in the
+// one running WorldRoom instance (see DUNGEON_ROOM's comment), so no
+// cross-room presence infrastructure is needed for players to find/invite
+// each other.
+
+export const MAX_PARTY_SIZE = 4;
+
+export interface InvitePartyMessage {
+  targetSessionId: string;
+}
+
+// Pushed to the invitee only — the client shows a blocking accept/decline
+// prompt (this is rare and needs an answer now, unlike e.g. loot drops).
+export interface PartyInviteReceivedMessage {
+  fromSessionId: string;
+  fromName: string;
+}
+
+export interface RespondPartyInviteMessage {
+  fromSessionId: string;
+  accept: boolean;
+}
+
+// Client -> server: leave (or, if the sender is the only member, disband)
+// the sender's current party. No payload — "which party" is implicit from
+// the sender's session.
+export interface LeavePartyMessage {}
+
+export interface PartyActionFailedMessage {
+  reason: string;
+}
+
+export interface PartyMemberView {
+  sessionId: string;
+  name: string;
+  level: number;
+  className: string;
+}
+
+// Pushed to every current member whenever the roster changes (invite
+// accepted, member left, party disbanded) — an empty members array means
+// "you are not in a party." leaderSessionId is currently cosmetic (no
+// leader-only permissions are enforced yet — see the party system's scope
+// notes) but is included since a roster reads oddly with no leader shown.
+export interface PartyStateMessage {
+  leaderSessionId: string | null;
+  members: PartyMemberView[];
+}
+
+// --- Portals / dungeons ---
+
+// Client -> server: interact with a portal (walk up and click it, same
+// interaction shape as talking to an NPC).
+export interface UsePortalMessage {
+  portalId: string;
+}
+
+export interface PortalFailedMessage {
+  reason: string;
+}
+
+// Sent to every member of the entering party (not just whoever clicked the
+// portal), telling the client which room/map to switch to. roomId is only
+// present for a dungeon target — the client joins that specific instance
+// by id (see net/RoomClient.ts's joinRoomById) so the whole party lands in
+// the same room. A portal to a non-dungeon map (the overworld, e.g. a
+// dungeon's return portal) omits roomId entirely — the client just rejoins
+// the shared overworld room via ordinary matchmaking (connectToWorld).
+// mapId is always present so the client can bootstrap map metadata
+// (tileSize/spawn point/cliffColor) for the destination map instead of
+// assuming "the active map" the way the very first connect does.
+export interface PortalGrantedMessage {
+  roomId?: string;
+  mapId: string;
+}
+
+// Broadcast to a dungeon instance's room when its boss (a MonsterSpawn
+// flagged isBoss) dies. No payload — the client just shows a clear message;
+// there's no separate persisted "this character has cleared this dungeon"
+// tracking (loot + a message is the full scope for this pass).
+export interface DungeonClearedMessage {}
+
+// Sent to the requesting client only, in place of an immediate
+// PortalGrantedMessage, whenever the clicked portal's target is a dungeon
+// map — gives the client enough to show a confirmation screen (description,
+// level requirement, party roster/invite) before actually committing to
+// create/join the instance via EnterDungeonMessage. A portal to a
+// non-dungeon map (including a dungeon's own return portal) skips this
+// entirely and still resolves immediately, since there's nothing to
+// confirm about leaving.
+export interface DungeonPromptMessage {
+  portalId: string;
+  mapId: string;
+  name: string;
+  description: string;
+  minLevel: number;
+}
+
+// Client -> server: confirms a dungeon entry previously offered via
+// DungeonPromptMessage. Re-validates range/level server-side exactly like
+// UsePortalMessage did before this prompt step existed — the prompt is a UX
+// nicety, not something the server trusts blindly.
+export interface EnterDungeonMessage {
+  portalId: string;
 }

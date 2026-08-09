@@ -5,6 +5,7 @@ import type {
   Monster,
   Projectile,
   Npc,
+  Portal,
   RoomState,
   SpellId,
   SpellDef,
@@ -22,6 +23,13 @@ import type {
   TalentTemplateDTO,
   TalentStateMessage,
   TalentActionFailedMessage,
+  PortalFailedMessage,
+  PortalGrantedMessage,
+  DungeonClearedMessage,
+  DungeonPromptMessage,
+  PartyInviteReceivedMessage,
+  PartyStateMessage,
+  PartyActionFailedMessage,
 } from "shared";
 import {
   MOVE_SPEED,
@@ -40,16 +48,35 @@ import {
   TILE_COLORS,
   TileType,
 } from "shared";
-import { connectToWorld } from "../net/RoomClient.js";
-import { fetchActiveMap, fetchMapTiles, fetchSpells, fetchTalents, fetchMe } from "../net/api.js";
+import { connectToWorld, joinRoomById } from "../net/RoomClient.js";
+import { fetchActiveMap, fetchMapById, fetchMapTiles, fetchSpells, fetchTalents, fetchMe } from "../net/api.js";
 import { Hud } from "../ui/Hud.js";
 import { npcDialogue } from "../ui/NpcDialogue.js";
-import { sidebar } from "../ui/Sidebar.js";
+import { sidebar, type OnlinePlayerView } from "../ui/Sidebar.js";
+import { dungeonPrompt } from "../ui/DungeonPrompt.js";
 
 const REMOTE_SMOOTHING = 0.25; // lerp factor applied per frame toward server position
+// The local player predicts its own movement (see updateInput) and never
+// hard-snaps to the server's echoed position — that was deliberate, since
+// re-syncing to targetX/Y every tick caused visible rubber-banding (it's
+// always a little behind due to latency). But with ZERO correction ever
+// applied, any discrepancy between client and server (differing per-tick dt
+// granularity, a dropped input, etc.) has nothing pulling it back and can
+// accumulate indefinitely — the server (monster AI, attack range/LOS, hit
+// detection) always uses its own true position, so a drifted local render
+// eventually shows the player somewhere monsters visibly aren't chasing/
+// attacking, even though the hits are landing correctly server-side.
+// Applied only while idle (see updateInput) — since nothing is fighting it
+// there, it can afford to be much stronger than REMOTE_SMOOTHING without
+// looking like a snap.
+const LOCAL_RECONCILE_SMOOTHING = 0.15;
 const HP_BAR_WIDTH = 30;
 const HP_BAR_HEIGHT = 4;
 const HP_BAR_OFFSET_Y = 20;
+// Drawn above the HP bar rather than below it, so a monster's melee-range
+// indicator and its HP bar don't get visually confused with the channel bar.
+const CAST_BAR_HEIGHT = 4;
+const CAST_BAR_OFFSET_Y = HP_BAR_OFFSET_Y + 8;
 // Opacity applied to an entity's sprite + HP bar while standing behind a
 // cliff tall enough to hide them (see isHiddenByTerrain) — faded rather
 // than fully invisible so the entity doesn't just vanish/pop.
@@ -113,6 +140,12 @@ interface MonsterEntity extends HpBarHolder {
   maxHp: number;
   level: number;
   attackRange: number;
+  // Lazily created on the monster's first cast — most monsters never cast,
+  // so paying for two extra rectangles per monster up front is wasted.
+  castBarBg?: Phaser.GameObjects.Rectangle;
+  castBarFill?: Phaser.GameObjects.Rectangle;
+  castStartedAt?: number;
+  castDurationMs: number;
 }
 
 interface ProjectileEntity {
@@ -126,6 +159,10 @@ interface ProjectileEntity {
 interface NpcEntity {
   rect: Phaser.GameObjects.Rectangle;
   nameText: Phaser.GameObjects.Text;
+}
+
+interface PortalEntity {
+  rect: Phaser.GameObjects.Ellipse;
 }
 
 // Physical key position (layout-independent), not Phaser's named keydown-*
@@ -153,6 +190,7 @@ export class WorldScene extends Phaser.Scene {
   private entities = new Map<string, PlayerEntity>();
   private monsters = new Map<string, MonsterEntity>();
   private npcs = new Map<string, NpcEntity>();
+  private portals = new Map<string, PortalEntity>();
   private projectiles = new Map<string, ProjectileEntity>();
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasd?: Record<"W" | "A" | "S" | "D", Phaser.Input.Keyboard.Key>;
@@ -160,6 +198,12 @@ export class WorldScene extends Phaser.Scene {
   private lastSent = { dx: 0, dy: 0 };
   private token = "";
   private characterId = "";
+  // Present only when entering via a portal (see main.ts's "switch-room"
+  // event) — join that specific dungeon instance instead of the plain
+  // overworld, and bootstrap map metadata for `dungeonMapId` instead of
+  // assuming "the active map."
+  private roomId?: string;
+  private dungeonMapId?: string;
   private chunkCache!: ChunkTileCache;
   // Solid fill color for the "riser" face drawn between two adjacent tiles
   // at different elevation — admin-configured per map (packages/admin/src/mapEditor.ts),
@@ -182,6 +226,14 @@ export class WorldScene extends Phaser.Scene {
   // learnTalent round-trip instead of the moment a level-up grants one.
   private talentsLearnedCache: TalentStateMessage["learned"] = [];
   private spellDefs = new Map<SpellId, SpellDef>();
+  // Mirrors of the two pieces of state the dungeon-entry prompt (see
+  // DungeonPrompt) needs but doesn't otherwise have a subscription to —
+  // refreshOnlinePlayers/the "partyState" handler already compute these for
+  // the sidebar's Party tab, this just keeps a copy so the prompt (which may
+  // pop open at any time, independent of which sidebar tab is active) can
+  // render an up-to-date roster/invite list without its own room listeners.
+  private onlinePlayers: OnlinePlayerView[] = [];
+  private partyState: PartyStateMessage = { leaderSessionId: null, members: [] };
   private target: Target | null = null;
   private targetRing?: Phaser.GameObjects.Rectangle;
   // Shows the targeted monster's real attackRange footprint — under iso
@@ -205,9 +257,11 @@ export class WorldScene extends Phaser.Scene {
     super("world");
   }
 
-  init(data: { token: string; characterId: string }) {
+  init(data: { token: string; characterId: string; roomId?: string; mapId?: string }) {
     this.token = data.token;
     this.characterId = data.characterId;
+    this.roomId = data.roomId;
+    this.dungeonMapId = data.mapId;
   }
 
   preload() {
@@ -227,7 +281,7 @@ export class WorldScene extends Phaser.Scene {
 
   private async buildWorld() {
     const [activeMap, spells, talents, account] = await Promise.all([
-      fetchActiveMap(),
+      this.dungeonMapId ? fetchMapById(this.dungeonMapId) : fetchActiveMap(),
       fetchSpells(),
       fetchTalents(),
       fetchMe(this.token),
@@ -305,8 +359,11 @@ export class WorldScene extends Phaser.Scene {
       this.setTarget(null);
     });
 
-    const { room, $ } = await connectToWorld(this.token, this.characterId);
+    const { room, $ } = this.roomId
+      ? await joinRoomById(this.roomId, this.token, this.characterId)
+      : await connectToWorld(this.token, this.characterId);
     this.room = room;
+    sidebar.setMySessionId(room.sessionId);
 
     room.onMessage("heal", (msg: HealEventMessage) => this.playHealEffect(msg.sessionId));
     room.onMessage("groundAoe", (msg: GroundAoeEventMessage) => this.playGroundAoeEffect(msg));
@@ -347,6 +404,49 @@ export class WorldScene extends Phaser.Scene {
       onLevelTo10: () => room.send("adminSetLevel", { level: 10 }),
     });
 
+    // Switching rooms is handled by main.ts (a full fresh Phaser.Game, not
+    // an in-place reconnect — see its "switch-room" listener) since
+    // buildWorld's connect/listener setup only runs safely once per scene.
+    room.onMessage("portalGranted", (msg: PortalGrantedMessage) => {
+      dungeonPrompt.hide();
+      window.dispatchEvent(
+        new CustomEvent("switch-room", {
+          detail: { token: this.token, characterId: this.characterId, roomId: msg.roomId, mapId: msg.mapId },
+        }),
+      );
+    });
+    room.onMessage("portalFailed", (msg: PortalFailedMessage) => alert(msg.reason));
+    room.onMessage("dungeonCleared", (_msg: DungeonClearedMessage) => alert("Dungeon cleared!"));
+
+    // Shown instead of entering immediately whenever the clicked portal
+    // leads to a dungeon — see WorldRoom.handleUsePortal. The party
+    // invite/leave buttons inside it send the exact same messages the
+    // sidebar's Party tab does; this is just a second surface for the same
+    // room-wide party system, not a separate one.
+    room.onMessage("dungeonPrompt", (msg: DungeonPromptMessage) => {
+      dungeonPrompt.show(msg, this.partyState, this.onlinePlayers, room.sessionId, {
+        onInvite: (targetSessionId) => room.send("inviteParty", { targetSessionId }),
+        onLeave: () => room.send("leaveParty", {}),
+        onEnter: (portalId) => room.send("enterDungeon", { portalId }),
+        onCancel: () => {},
+      });
+    });
+
+    room.onMessage("partyInviteReceived", (msg: PartyInviteReceivedMessage) => {
+      const accept = confirm(`${msg.fromName} invited you to a party. Accept?`);
+      room.send("respondPartyInvite", { fromSessionId: msg.fromSessionId, accept });
+    });
+    room.onMessage("partyState", (msg: PartyStateMessage) => {
+      this.partyState = msg;
+      sidebar.setParty(msg);
+      dungeonPrompt.updateParty(msg);
+    });
+    room.onMessage("partyActionFailed", (msg: PartyActionFailedMessage) => alert(msg.reason));
+    sidebar.setPartyHandlers({
+      onInvite: (targetSessionId) => room.send("inviteParty", { targetSessionId }),
+      onLeave: () => room.send("leaveParty", {}),
+    });
+
     this.input.keyboard?.on("keydown", (event: KeyboardEvent) => {
       const spellId = SPELL_KEY_CODES[event.code];
       if (spellId) this.handleSpellActivated(spellId);
@@ -373,6 +473,7 @@ export class WorldScene extends Phaser.Scene {
       };
       this.entities.set(sessionId, entity);
       this.positionHpBar(entity);
+      this.refreshOnlinePlayers();
 
       if (isLocal) {
         // lerpX/Y eases the camera toward the player instead of snapping to
@@ -438,6 +539,7 @@ export class WorldScene extends Phaser.Scene {
       entity?.hpBarBg.destroy();
       entity?.hpBarFill.destroy();
       this.entities.delete(sessionId);
+      this.refreshOnlinePlayers();
     });
 
     $(room.state).monsters.onAdd((monster: Monster, id: string) => {
@@ -462,11 +564,13 @@ export class WorldScene extends Phaser.Scene {
         maxHp: monster.maxHp,
         level: monster.level,
         attackRange: monster.attackRange,
+        castDurationMs: monster.castDurationMs,
       };
       this.monsters.set(id, entity);
       this.positionHpBar(entity);
 
       let lastHp = monster.hp;
+      let wasCasting = monster.casting;
       $(monster).onChange(() => {
         entity.targetX = monster.x;
         entity.targetY = monster.y;
@@ -479,6 +583,27 @@ export class WorldScene extends Phaser.Scene {
           this.tweens.add({ targets: rect, alpha: 0.15, duration: 60, yoyo: true, repeat: 1 });
         }
         lastHp = monster.hp;
+
+        // A flip to true is the only "cast started" signal synced from the
+        // server (see Monster schema) — the client times the fill itself
+        // from this moment, mirroring Hud's own cast bar.
+        if (monster.casting && !wasCasting) {
+          entity.castDurationMs = monster.castDurationMs;
+          entity.castStartedAt = this.time.now;
+          if (!entity.castBarBg || !entity.castBarFill) {
+            const { castBarBg, castBarFill } = this.createCastBar(rect.x, rect.y);
+            entity.castBarBg = castBarBg;
+            entity.castBarFill = castBarFill;
+          }
+          entity.castBarFill.width = 0;
+          entity.castBarBg.setVisible(true);
+          entity.castBarFill.setVisible(true);
+        } else if (!monster.casting && wasCasting) {
+          entity.castStartedAt = undefined;
+          entity.castBarBg?.setVisible(false);
+          entity.castBarFill?.setVisible(false);
+        }
+        wasCasting = monster.casting;
       });
     });
 
@@ -487,6 +612,8 @@ export class WorldScene extends Phaser.Scene {
       entity?.rect.destroy();
       entity?.hpBarBg.destroy();
       entity?.hpBarFill.destroy();
+      entity?.castBarBg?.destroy();
+      entity?.castBarFill?.destroy();
       this.monsters.delete(id);
       if (this.target?.kind === "monster" && this.target.id === id) this.setTarget(null);
     });
@@ -518,6 +645,22 @@ export class WorldScene extends Phaser.Scene {
       entity?.rect.destroy();
       entity?.nameText.destroy();
       this.npcs.delete(id);
+    });
+
+    $(room.state).portals.onAdd((portal: Portal, id: string) => {
+      const p = this.projectEntity(portal.x, portal.y);
+      const rect = this.add.ellipse(p.x, p.y, 28, 18, 0x9d4dff, 0.7).setStrokeStyle(2, 0xd9b8ff).setDepth(p.depth);
+      rect.setInteractive({ useHandCursor: true });
+      rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+        if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
+        if (pointer.leftButtonDown()) this.room?.send("usePortal", { portalId: id });
+      });
+      this.portals.set(id, { rect });
+    });
+
+    $(room.state).portals.onRemove((_portal: Portal, id: string) => {
+      this.portals.get(id)?.rect.destroy();
+      this.portals.delete(id);
     });
 
     $(room.state).projectiles.onAdd((projectile: Projectile, id: string) => {
@@ -832,6 +975,41 @@ export class WorldScene extends Phaser.Scene {
     entity.hpBarFill.setPosition(entity.rect.x - HP_BAR_WIDTH / 2, barY).setDepth(entity.rect.depth + 2);
   }
 
+  private createCastBar(x: number, y: number) {
+    const barY = y - CAST_BAR_OFFSET_Y;
+    const castBarBg = this.add.rectangle(x, barY, HP_BAR_WIDTH, CAST_BAR_HEIGHT, 0x222222);
+    const castBarFill = this.add.rectangle(x - HP_BAR_WIDTH / 2, barY, 0, CAST_BAR_HEIGHT, 0xffaa33).setOrigin(0, 0.5);
+    return { castBarBg, castBarFill };
+  }
+
+  // Only called for monsters that have actually cast at least once (the bar
+  // is lazily created) — a no-op for every other monster's per-frame update.
+  private positionCastBar(entity: MonsterEntity) {
+    if (!entity.castBarBg || !entity.castBarFill) return;
+    const barY = entity.rect.y - CAST_BAR_OFFSET_Y;
+    entity.castBarBg.setPosition(entity.rect.x, barY).setDepth(entity.rect.depth + 1);
+    entity.castBarFill.setPosition(entity.rect.x - HP_BAR_WIDTH / 2, barY).setDepth(entity.rect.depth + 2);
+
+    if (entity.castStartedAt == null) return;
+    const elapsed = this.time.now - entity.castStartedAt;
+    const frac = Math.min(1, entity.castDurationMs > 0 ? elapsed / entity.castDurationMs : 1);
+    entity.castBarFill.width = HP_BAR_WIDTH * frac;
+  }
+
+  // Recomputed wholesale from room.state.players (a live, always-current
+  // snapshot) rather than incrementally tracked — simpler, and this only
+  // runs on the infrequent join/leave edge, not every frame.
+  private refreshOnlinePlayers() {
+    if (!this.room) return;
+    const players: OnlinePlayerView[] = [];
+    this.room.state.players.forEach((player, sessionId) => {
+      players.push({ sessionId, name: player.name });
+    });
+    this.onlinePlayers = players;
+    sidebar.setOnlinePlayers(players);
+    dungeonPrompt.updateOnlinePlayers(players);
+  }
+
   // Fades an entity (and its HP bar) while a cliff tall enough to hide them
   // stands between their current tile and the camera — purely a rendering
   // effect, see isHiddenByTerrain in shared/src/map.ts.
@@ -1136,9 +1314,9 @@ export class WorldScene extends Phaser.Scene {
     // rather than targetX/Y — targetX/Y is continuously overwritten by
     // server state broadcasts, so using it here would snap prediction back
     // to a network-lagged position on every tick (rubber-banding).
-    if (screenDx !== 0 || screenDy !== 0) {
-      const local = this.entities.get(this.room.sessionId);
-      if (local?.isLocal) {
+    const local = this.entities.get(this.room.sessionId);
+    if (local?.isLocal) {
+      if (screenDx !== 0 || screenDy !== 0) {
         const resolved = resolveMovement(
           this.chunkCache,
           local.worldX,
@@ -1148,13 +1326,27 @@ export class WorldScene extends Phaser.Scene {
         );
         local.worldX = resolved.x;
         local.worldY = resolved.y;
-        const p = this.projectEntity(resolved.x, resolved.y);
-        local.rect.x = p.x;
-        local.rect.y = p.y;
-        local.rect.setDepth(p.depth);
-        this.positionHpBar(local);
-        this.applyOcclusion(local, resolved.x, resolved.y);
+      } else {
+        // Reconciliation only runs while idle, not on every frame — pulling
+        // toward the server's last-reported position (always a little
+        // behind, due to latency) *while actively predicting* fights the
+        // input-driven movement above, since prediction pushes forward at
+        // full speed the same frame reconciliation pulls back toward a
+        // laggier point. That tug-of-war is what made movement feel
+        // sluggish/imprecise. Idle is also when any drift is easiest to
+        // correct invisibly — there's no ongoing motion for a small nudge
+        // to visibly interrupt — so it uses a much stronger factor than
+        // REMOTE_SMOOTHING would need for a moving entity.
+        local.worldX = Phaser.Math.Linear(local.worldX, local.targetX, LOCAL_RECONCILE_SMOOTHING);
+        local.worldY = Phaser.Math.Linear(local.worldY, local.targetY, LOCAL_RECONCILE_SMOOTHING);
       }
+
+      const p = this.projectEntity(local.worldX, local.worldY);
+      local.rect.x = p.x;
+      local.rect.y = p.y;
+      local.rect.setDepth(p.depth);
+      this.positionHpBar(local);
+      this.applyOcclusion(local, local.worldX, local.worldY);
     }
   }
 
@@ -1178,6 +1370,7 @@ export class WorldScene extends Phaser.Scene {
       const p = this.projectEntity(entity.worldX, entity.worldY);
       entity.rect.setPosition(p.x, p.y).setDepth(p.depth);
       this.positionHpBar(entity);
+      this.positionCastBar(entity);
       this.applyOcclusion(entity, entity.worldX, entity.worldY);
     }
 

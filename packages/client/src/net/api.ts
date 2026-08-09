@@ -20,6 +20,20 @@ export async function fetchActiveMap(): Promise<ActiveMapResponse> {
   return response.json() as Promise<ActiveMapResponse>;
 }
 
+// The dungeon equivalent of fetchActiveMap — bootstraps the same fields
+// (tileSize/spawn point/cliffColor) but for a specific map by id (from
+// PortalGrantedMessage) rather than assuming "whichever map is active."
+// GET /:id is public and returns the full GameMapDTO, a strict superset of
+// what's needed here.
+export async function fetchMapById(mapId: string): Promise<ActiveMapResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/maps/${mapId}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch map: ${response.status}`);
+  }
+  const map = (await response.json()) as { id: string; tileSize: number; spawnX: number; spawnY: number; cliffColor: number };
+  return { mapId: map.id, tileSize: map.tileSize, spawnX: map.spawnX, spawnY: map.spawnY, cliffColor: map.cliffColor };
+}
+
 // Backs the client-side ChunkTileCache (see WorldScene) — one range per
 // chunk (or per warmed radius), never the whole map, since the world has no
 // fixed size to fetch all of.

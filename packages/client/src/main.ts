@@ -65,7 +65,14 @@ function ensureClassesLoaded() {
   return classesLoaded;
 }
 
-function startGame(token: string, characterId: string) {
+// Tracked so a dungeon/overworld room switch (see the "switch-room" listener
+// below) can tear down the previous Phaser.Game before creating a fresh
+// one — a full Game teardown+recreate, not scene-level teardown, since
+// WorldScene's connect/listener setup was written to run exactly once per
+// page load and isn't safely re-enterable.
+let currentGame: Phaser.Game | undefined;
+
+function startGame(token: string, characterId: string, roomId?: string, mapId?: string) {
   loginOverlay.remove();
   characterOverlay.remove();
 
@@ -74,8 +81,9 @@ function startGame(token: string, characterId: string) {
 
   // WorldScene dispatches these once it either finishes connecting and the
   // local player spawns, or fails (bad token, fetch/room-join error) — see
-  // WorldScene.create()/buildWorld().
-  window.addEventListener("world-ready", () => loadingOverlay.remove(), { once: true });
+  // WorldScene.create()/buildWorld(). Hidden (not removed) on success so the
+  // same overlay element can be reused for a later room switch.
+  window.addEventListener("world-ready", () => (loadingOverlay.style.display = "none"), { once: true });
   window.addEventListener(
     "world-error",
     ((event: CustomEvent<string>) => {
@@ -104,8 +112,22 @@ function startGame(token: string, characterId: string) {
     },
   });
 
-  game.scene.add("world", WorldScene, true, { token, characterId });
+  currentGame = game;
+  game.scene.add("world", WorldScene, true, { token, characterId, roomId, mapId });
 }
+
+// Dispatched by WorldScene (see its PortalGrantedMessage handler) rather
+// than switching rooms in place — WorldScene/buildWorld assume a single
+// connect per page load, so the safe way to switch to a different room
+// instance is a full fresh Phaser.Game, the same mechanism the very first
+// connect already uses (see startGame).
+window.addEventListener("switch-room", ((
+  event: CustomEvent<{ token: string; characterId: string; roomId?: string; mapId: string }>,
+) => {
+  currentGame?.destroy(true);
+  currentGame = undefined;
+  startGame(event.detail.token, event.detail.characterId, event.detail.roomId, event.detail.mapId);
+}) as EventListener);
 
 function renderCharacterList(token: string, characters: CharacterDTO[]) {
   characterList.innerHTML = "";
