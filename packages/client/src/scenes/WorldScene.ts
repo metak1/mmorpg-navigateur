@@ -898,18 +898,18 @@ export class WorldScene extends Phaser.Scene {
   // sits in.
   //
   // Each tile is exactly one full Kenney "Isometric Blocks" cube sprite (top
-  // face plus its two baked-in south/east side faces — see assets.ts), and
-  // ONLY that sprite — no hand-drawn vector fill of any kind anymore, for
-  // any elevation difference. Several custom-drawn fallbacks were tried on
-  // top of the cube (a flat-color fill for cliffs taller than one cube's own
-  // sides, another for north/west drops the cube art can't show a face for
-  // at all) and all ended up re-adding the exact kind of hand-coded vertical
-  // geometry the move to real block sprites was meant to replace. Pure
-  // block rendering: a north/west drop shows nothing (this camera angle
-  // can't see that face on a real cube either — physically correct, if a
-  // little less obvious as terrain), and a cliff steeper than one cube
-  // covers shows a plain gap rather than another shape entirely. Both are
-  // the accepted tradeoff for a map built entirely out of real cube sprites.
+  // face plus its two baked-in south/east side faces — see assets.ts) —
+  // no hand-drawn vector fill for the tile itself. A cliff is filled below
+  // that with one whole extra block per elevation level, from level 0 up to
+  // this tile's own real one (level 0 gets a block, level 1 gets a block,
+  // ...) — the exact same full cube sprite each time, just stacked one
+  // levelDisplayHeight lower per level down, with the real block always
+  // added last so it draws on top and hides the seam of the one below it
+  // (see the filler loop below). A north/west drop shows nothing (this
+  // camera angle can't see that face on a real cube either — physically
+  // correct, if a little less obvious as terrain, and the one existing
+  // texture has no north/west face baked in to reuse for it either) — the
+  // accepted tradeoff for a map built entirely out of real cube sprites.
   private createChunkLayer(key: string, chunkCol: number, chunkRow: number) {
     const tileSize = this.chunkCache.tileSize;
     // Every object this chunk creates, so destroyChunkLayer can tear them
@@ -934,6 +934,11 @@ export class WorldScene extends Phaser.Scene {
     // (centerX, centerY) lines the top face up exactly where the old flat
     // diamond used to be, with the baked-in sides simply hanging below it.
     const topOriginYFraction = TERRAIN_CUBE_SOURCE_TOP_HEIGHT / 2 / TERRAIN_CUBE_SOURCE_HEIGHT;
+    // One elevation level's worth of screen-space height — the south/east
+    // filler below stacks in units of exactly this, one whole block per
+    // level, so a cliff from level 0 to level N always lands exactly on
+    // level 0 with nothing left over.
+    const levelDisplayHeight = isoElevationOffset(1, tileSize);
 
     // Flat tiles never overlap on screen, so draw order didn't matter
     // before elevation existed. An elevated tile's diamond IS shifted up
@@ -969,18 +974,6 @@ export class WorldScene extends Phaser.Scene {
       const centerX = (corners[0].x + corners[2].x) / 2;
       const centerY = (corners[0].y + corners[2].y) / 2;
 
-      // Exactly one cube per tile, never stacked. Stacking extra cubes (or
-      // a dedicated side-only crop) to reach a lower neighbor more than one
-      // cube's-worth down was tried and looked worse than this: this cube
-      // art bakes in shading meant for a single standalone icon, and EVERY
-      // repeat of it — top faces tiled flat, side crops stacked, or full
-      // cubes stacked — reproduces that shading as a visible seam/triangle.
-      // One cube per tile has no repeat, so no seam. The tradeoff is a
-      // tall cliff (more than ~2 elevation steps in one jump) shows a gap
-      // below this cube's own natural sides instead of a solid wall — rare
-      // in practice (typical terrain steps 1-2 levels at a time) and a
-      // plain visual gap reads as far less obviously broken than the
-      // shading artifact did.
       // A real per-tile depth (not a shared container/chunk-level value) —
       // see the chunkLayers field comment for why this specific value
       // matters now that a cube's sides can visually reach into a
@@ -991,12 +984,57 @@ export class WorldScene extends Phaser.Scene {
       const tileDepth = TERRAIN_DEPTH + col + row;
 
       const fullKey = TERRAIN_FULL_TEXTURE_KEYS[tileType] ?? TERRAIN_FULL_TEXTURE_KEYS[TileType.Grass];
+
+      // A raised tile's own cube bottom sits elevationShift px above where
+      // this tile would be at elevation 0 — one whole block per level fills
+      // that gap: level 0 gets a block, level 1 gets a block, ... up to
+      // this tile's own real block at its actual elevation (level 0/2 pngs)
+      // — the same full, undistorted cube sprite every time, just
+      // positioned one levelDisplayHeight lower per level down, not a
+      // cropped/squeezed sliver. This stays a plain per-tile calculation,
+      // continuing straight down this tile's own screen column regardless
+      // of what's actually there (see the chunk comment above — this
+      // renderer never looks at neighbors for its own elevation).
+      //
+      // Order matters: at equal depth (same tile), Phaser draws later-added
+      // objects on top of earlier ones, so every filler below the tile's
+      // real elevation is added first (ascending from level 0), with the
+      // real block added LAST — its own side art naturally reaches down
+      // more than one level, so it draws over and hides each filler's top
+      // edge below it, seamlessly, the same way one flat block already
+      // hides the tops of the ones "behind" it in ordinary flat terrain.
+      for (let level = 0; level < elevation; level++) {
+        const fillerImg = this.add
+          .image(centerX, centerY + (elevation - level) * levelDisplayHeight, fullKey)
+          .setOrigin(0.5, topOriginYFraction)
+          .setDisplaySize(diamondW, fullDisplayH)
+          .setDepth(tileDepth);
+        terrainObjects.push(fillerImg);
+      }
+
       const fullImg = this.add
         .image(centerX, centerY, fullKey)
         .setOrigin(0.5, topOriginYFraction)
         .setDisplaySize(diamondW, fullDisplayH)
         .setDepth(tileDepth);
       terrainObjects.push(fullImg);
+
+      // TEMP DEBUG — remove before finishing: outlines the tile's true
+      // world-grid diamond (from the raw corners) in magenta, plus a dot at
+      // its exact center, so I can visually check whether the rendered
+      // texture actually lines up with the mathematical grid cell.
+      const debugG = this.add.graphics().setDepth(100000);
+      debugG.lineStyle(1, 0xff00ff, 1);
+      debugG.beginPath();
+      debugG.moveTo(corners[0].x, corners[0].y);
+      debugG.lineTo(corners[1].x, corners[1].y);
+      debugG.lineTo(corners[2].x, corners[2].y);
+      debugG.lineTo(corners[3].x, corners[3].y);
+      debugG.closePath();
+      debugG.strokePath();
+      debugG.fillStyle(0xff00ff, 1);
+      debugG.fillCircle(centerX, centerY, 2);
+      terrainObjects.push(debugG);
 
       // Decorative furniture (see shared/src/api-types.ts's PropType) — a
       // real projectEntity-style depth (not tileDepth) since, unlike

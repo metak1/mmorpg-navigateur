@@ -26,11 +26,20 @@ export const TERRAIN_FULL_TEXTURE_KEYS: Record<number, string> = {
 // Pixel dimensions baked into every -full terrain PNG (see
 // public/assets/tiles/) — all four cropped from the same Kenney "Isometric
 // Blocks" voxel cube layout, so one set of measurements covers all of them.
-// TOP_HEIGHT is exactly half of WIDTH (a 2:1 iso diamond); the cube image is
-// the top diamond plus its two baked-in side faces stacked below it.
+// The cube image is the top diamond plus its two baked-in side faces
+// stacked below it. TOP_HEIGHT isn't the idealized "exactly half of WIDTH"
+// a mathematically perfect 2:1 diamond would have (111/2 = 55.5) — measured
+// directly from the actual artwork's alpha channel (every one of these four
+// PNGs' top face is fully opaque edge-to-edge, x=0..110, at row 31, i.e.
+// TOP_HEIGHT/2), the art's top face reads as visually taller than that.
+// Using the idealized value here throws off WorldScene.createChunkLayer's
+// topOriginYFraction (which positions every cube off this) by a few
+// pixels, consistently, on every single tile — the measured value is what
+// actually lines a cube's top-face center up with its tile's true grid
+// center.
 export const TERRAIN_CUBE_SOURCE_WIDTH = 111;
 export const TERRAIN_CUBE_SOURCE_HEIGHT = 128;
-export const TERRAIN_CUBE_SOURCE_TOP_HEIGHT = 56;
+export const TERRAIN_CUBE_SOURCE_TOP_HEIGHT = 62;
 
 const TERRAIN_ASSET_PATHS: Record<string, string> = {
   "tile-grass-full": "/assets/tiles/grass-full.png",
