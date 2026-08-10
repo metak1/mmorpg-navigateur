@@ -28,6 +28,15 @@ export interface MoveInputMessage {
   direction: "up" | "down" | "left" | "right";
 }
 
+// Sent to a client only, when they walk into a "barrier" cell (see
+// shared/src/map.ts's WorldGrid.blocksMovementAt) — an invisible
+// movement/LOS/projectile blocker admins paint to cap an otherwise-infinite
+// map without a visible wall. Throttled server-side (see WorldRoom) so
+// holding a direction into one doesn't spam repeats.
+export interface ZoneBlockedMessage {
+  message: string;
+}
+
 export interface CastInputMessage {
   spellId: SpellId;
   // Monster id to aim at, captured at cast time. Omitted/ignored for

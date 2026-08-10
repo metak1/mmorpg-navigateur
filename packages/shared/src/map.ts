@@ -15,6 +15,13 @@ export interface WorldGrid {
   tileSize: number;
   tileAt(col: number, row: number): number;
   elevationAt(col: number, row: number): number;
+  // True for a cell painted with the invisible "barrier" overlay (see
+  // isWalkableCell) — independent of tileType/elevation, so it can be
+  // layered on top of whatever's already there (e.g. Grass) to block
+  // movement/projectiles/line-of-sight without changing how the cell looks.
+  // The intended use is hand-authoring a hard edge to an otherwise-infinite
+  // map without needing a visible wall there.
+  blocksMovementAt(col: number, row: number): boolean;
 }
 
 // Movement is blocked between two tiles whose elevation differs by more
@@ -85,6 +92,21 @@ export function isWalkable(tileType: number): boolean {
   return tileType !== TileType.Wall && tileType !== TileType.Water;
 }
 
+// The one place tileType-walkability and the invisible blocksMovement
+// overlay are combined — every collision/LOS/projectile check below goes
+// through this (or its pixel-space sibling isWalkableAt) rather than calling
+// isWalkable directly, so a barrier cell is indistinguishable from a real
+// Wall to gameplay code while staying invisible to rendering.
+export function isWalkableCell(grid: WorldGrid, col: number, row: number): boolean {
+  return isWalkable(grid.tileAt(col, row)) && !grid.blocksMovementAt(col, row);
+}
+
+export function isWalkableAt(grid: WorldGrid, xPixel: number, yPixel: number): boolean {
+  const col = Math.floor(xPixel / grid.tileSize);
+  const row = Math.floor(yPixel / grid.tileSize);
+  return isWalkableCell(grid, col, row);
+}
+
 export function getTileAt(grid: WorldGrid, xPixel: number, yPixel: number): number {
   const col = Math.floor(xPixel / grid.tileSize);
   const row = Math.floor(yPixel / grid.tileSize);
@@ -142,8 +164,26 @@ function isBlockedAt(grid: WorldGrid, x: number, y: number, fromElevation: numbe
     [x - PLAYER_HALF_SIZE, y + PLAYER_HALF_SIZE],
     [x + PLAYER_HALF_SIZE, y + PLAYER_HALF_SIZE],
   ];
-  if (corners.some(([cx, cy]) => !isWalkable(getTileAt(grid, cx, cy)))) return true;
+  if (corners.some(([cx, cy]) => !isWalkableAt(grid, cx, cy))) return true;
   return Math.abs(getElevationAt(grid, x, y) - fromElevation) > MAX_ELEVATION_STEP;
+}
+
+// Same AABB-corner shape as isBlockedAt, but answers a narrower question:
+// would a mover's hitbox AT this (uncommitted, pre-collision) candidate
+// position touch a barrier cell specifically? Used to give the player
+// explicit feedback on an otherwise-invisible block (see WorldRoom) —
+// checking the candidate's raw center point wouldn't work here, since the
+// PLAYER_HALF_SIZE margin that actually stops movement is bigger than a
+// single simulation tick's step, so a center-only lookahead never actually
+// reaches the blocking cell once the mover is pinned at the boundary.
+export function isBlockedByBarrier(grid: WorldGrid, x: number, y: number): boolean {
+  const corners: Array<[number, number]> = [
+    [x - PLAYER_HALF_SIZE, y - PLAYER_HALF_SIZE],
+    [x + PLAYER_HALF_SIZE, y - PLAYER_HALF_SIZE],
+    [x - PLAYER_HALF_SIZE, y + PLAYER_HALF_SIZE],
+    [x + PLAYER_HALF_SIZE, y + PLAYER_HALF_SIZE],
+  ];
+  return corners.some(([cx, cy]) => grid.blocksMovementAt(Math.floor(cx / grid.tileSize), Math.floor(cy / grid.tileSize)));
 }
 
 // Samples points along the segment at a quarter-tile step (fine enough to
@@ -177,7 +217,7 @@ export function hasLineOfSight(grid: WorldGrid, x1: number, y1: number, x2: numb
     const t = i / steps;
     const x = x1 + (x2 - x1) * t;
     const y = y1 + (y2 - y1) * t;
-    if (!isWalkable(getTileAt(grid, x, y))) return false;
+    if (!isWalkableAt(grid, x, y)) return false;
     if (getElevationAt(grid, x, y) > sightlineElevation + MAX_ELEVATION_STEP) return false;
   }
   return true;

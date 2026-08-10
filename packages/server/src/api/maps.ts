@@ -142,14 +142,18 @@ mapsRouter.get(
     const tiles = await prisma.mapTile.findMany({
       where: { mapId, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
     });
-    res.json(tiles.map((t): MapTileDTO => ({ col: t.col, row: t.row, tileType: t.tileType, elevation: t.elevation })));
+    res.json(
+      tiles.map(
+        (t): MapTileDTO => ({ col: t.col, row: t.row, tileType: t.tileType, elevation: t.elevation, blocksMovement: t.blocksMovement }),
+      ),
+    );
   }),
 );
 
 // Admin-only: paints (or, for entries back at the full default — Grass at
-// elevation 0 — resets to default, deleting the row) a batch of tiles.
-// Batched so an editor Save flushes all dirty cells in one request rather
-// than one write per paint stroke.
+// elevation 0 with no barrier — resets to default, deleting the row) a batch
+// of tiles. Batched so an editor Save flushes all dirty cells in one request
+// rather than one write per paint stroke.
 mapsRouter.put(
   "/:id/tiles",
   requireAdmin,
@@ -159,12 +163,19 @@ mapsRouter.put(
 
     await prisma.$transaction(
       body.tiles.map((tile) =>
-        tile.tileType === TileType.Grass && tile.elevation === 0
+        tile.tileType === TileType.Grass && tile.elevation === 0 && !tile.blocksMovement
           ? prisma.mapTile.deleteMany({ where: { mapId, col: tile.col, row: tile.row } })
           : prisma.mapTile.upsert({
               where: { mapId_col_row: { mapId, col: tile.col, row: tile.row } },
-              update: { tileType: tile.tileType, elevation: tile.elevation },
-              create: { mapId, col: tile.col, row: tile.row, tileType: tile.tileType, elevation: tile.elevation },
+              update: { tileType: tile.tileType, elevation: tile.elevation, blocksMovement: tile.blocksMovement },
+              create: {
+                mapId,
+                col: tile.col,
+                row: tile.row,
+                tileType: tile.tileType,
+                elevation: tile.elevation,
+                blocksMovement: tile.blocksMovement,
+              },
             }),
       ),
     );

@@ -5,11 +5,13 @@ export interface TileRangeEntry {
   row: number;
   tileType: number;
   elevation: number;
+  blocksMovement: boolean;
 }
 
 interface TileCell {
   tileType: number;
   elevation: number;
+  blocksMovement: boolean;
 }
 
 // Fetches every explicitly-painted tile within a rectangular tile-space
@@ -24,7 +26,7 @@ export type FetchRangeFn = (
 ) => Promise<TileRangeEntry[]>;
 
 const DEFAULT_MAX_CHUNKS = 2000;
-const DEFAULT_CELL: TileCell = { tileType: TileType.Grass, elevation: 0 };
+const DEFAULT_CELL: TileCell = { tileType: TileType.Grass, elevation: 0, blocksMovement: false };
 
 // Backs a WorldGrid with a sparse, on-demand-loaded tile source. See
 // map.ts's WorldGrid doc comment for why "chunk hasn't loaded yet" and
@@ -51,6 +53,10 @@ export class ChunkTileCache implements WorldGrid {
 
   elevationAt(col: number, row: number): number {
     return this.cellAt(col, row).elevation;
+  }
+
+  blocksMovementAt(col: number, row: number): boolean {
+    return this.cellAt(col, row).blocksMovement;
   }
 
   private cellAt(col: number, row: number): TileCell {
@@ -171,6 +177,7 @@ export class ChunkTileCache implements WorldGrid {
       chunk[entry.row - chunkRow * CHUNK_SIZE][entry.col - chunkCol * CHUNK_SIZE] = {
         tileType: entry.tileType,
         elevation: entry.elevation,
+        blocksMovement: entry.blocksMovement,
       };
     }
   }

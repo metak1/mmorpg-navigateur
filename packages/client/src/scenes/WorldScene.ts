@@ -13,6 +13,7 @@ import type {
   GroundAoeEventMessage,
   CastFizzledMessage,
   CastFailedMessage,
+  ZoneBlockedMessage,
   NpcDialogueMessage,
   QuestActionFailedMessage,
   QuestCompletedMessage,
@@ -266,7 +267,7 @@ export class WorldScene extends Phaser.Scene {
   // a screen-space circle.
   private groundAoePreviewRing?: Phaser.GameObjects.Ellipse;
   private groundAoeRangeRing?: Phaser.GameObjects.Ellipse;
-  private castFailedText?: Phaser.GameObjects.Text;
+  private bannerText?: Phaser.GameObjects.Text;
   private dungeonClearedText?: Phaser.GameObjects.Text;
 
   constructor() {
@@ -393,8 +394,9 @@ export class WorldScene extends Phaser.Scene {
     room.onMessage("castFizzled", (msg: CastFizzledMessage) => this.hud?.cancelCast(msg.spellId));
     room.onMessage("castFailed", (msg: CastFailedMessage) => {
       this.hud?.rejectCast(msg.spellId);
-      this.showCastFailedMessage(msg.reason);
+      this.showBanner(msg.reason);
     });
+    room.onMessage("zoneBlocked", (msg: ZoneBlockedMessage) => this.showBanner(msg.message));
     room.onMessage("npcDialogue", (msg: NpcDialogueMessage) => {
       npcDialogue.show(msg, {
         onAccept: (questId) => room.send("acceptQuest", { questId }),
@@ -1226,7 +1228,7 @@ export class WorldScene extends Phaser.Scene {
 
     const local = this.entities.get(this.room.sessionId);
     if (local && !hasLineOfSight(this.chunkCache, local.worldX, local.worldY, worldX, worldY)) {
-      this.showCastFailedMessage("No line of sight");
+      this.showBanner("No line of sight");
       return;
     }
 
@@ -1390,13 +1392,15 @@ export class WorldScene extends Phaser.Scene {
     if (this.targetHpFill) this.targetHpFill.width = TARGET_PANEL_HP_WIDTH * Math.max(0, hp / maxHp);
   }
 
-  // Reuses one text object (reset/re-tweened on each call) rather than
-  // spawning a new one per attempt, since a blocked cast is something a
-  // player is likely to retry rapidly (e.g. mashing the hotkey behind cover).
-  private showCastFailedMessage(reason: string) {
+  // Brief fading red banner at screen center — reuses one text object
+  // (reset/re-tweened on each call) rather than spawning a new one per
+  // message, since the triggers (spamming a blocked cast, walking into a
+  // barrier) tend to repeat rapidly. Used for cast rejections and the
+  // "zone not implemented" notice alike.
+  private showBanner(reason: string) {
     const cam = this.cameras.main;
-    if (!this.castFailedText) {
-      this.castFailedText = this.add
+    if (!this.bannerText) {
+      this.bannerText = this.add
         .text(0, 0, "", {
           fontSize: "16px",
           color: "#ff5555",
@@ -1407,13 +1411,13 @@ export class WorldScene extends Phaser.Scene {
         .setScrollFactor(0)
         .setDepth(UI_DEPTH);
     }
-    this.tweens.killTweensOf(this.castFailedText);
-    this.castFailedText.setText(reason).setPosition(cam.width / 2, cam.height / 2 - 80).setAlpha(1);
-    this.tweens.add({ targets: this.castFailedText, alpha: 0, duration: 800, delay: 500 });
+    this.tweens.killTweensOf(this.bannerText);
+    this.bannerText.setText(reason).setPosition(cam.width / 2, cam.height / 2 - 80).setAlpha(1);
+    this.tweens.add({ targets: this.bannerText, alpha: 0, duration: 800, delay: 500 });
   }
 
   // In-game banner (not a blocking alert()) — same reused-object/fade-tween
-  // shape as showCastFailedMessage, just a celebratory beat rather than an
+  // shape as showBanner, just a celebratory beat rather than an
   // error: bigger text, a pop-in scale tween, and a much longer hold before
   // it fades, since this only fires once per dungeon run and is worth
   // actually noticing.
@@ -1456,7 +1460,7 @@ export class WorldScene extends Phaser.Scene {
     const local = this.entities.get(this.room.sessionId);
     const monster = this.monsters.get(this.target.id);
     if (local && monster && !hasLineOfSight(this.chunkCache, local.worldX, local.worldY, monster.worldX, monster.worldY)) {
-      this.showCastFailedMessage("No line of sight");
+      this.showBanner("No line of sight");
       return;
     }
     this.hud.beginCast(spellId, spell.name, now);

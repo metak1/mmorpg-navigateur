@@ -47,6 +47,7 @@ export type EditableMap = Omit<GameMapDTO, "id" | "isActive"> & { id?: string };
 type Tool =
   | { kind: "tile"; tileType: number }
   | { kind: "elevation" }
+  | { kind: "blocksMovement" }
   | { kind: "player-spawn" }
   | { kind: "monster-spawn"; monsterTemplateId: string; isBoss: boolean }
   | { kind: "npc-spawn"; npcTemplateId: string }
@@ -55,9 +56,14 @@ type Tool =
 interface CellState {
   tileType: number;
   elevation: number;
+  // Invisible movement/LOS/projectile blocker, independent of tileType — see
+  // shared/src/map.ts's WorldGrid.blocksMovementAt. Shown in this editor as
+  // a red overlay (see draw()) so it stays paintable despite being invisible
+  // in the actual game.
+  blocksMovement: boolean;
 }
 
-const DEFAULT_CELL: CellState = { tileType: TileType.Grass, elevation: 0 };
+const DEFAULT_CELL: CellState = { tileType: TileType.Grass, elevation: 0, blocksMovement: false };
 const MIN_ELEVATION = -4;
 const MAX_ELEVATION = 4;
 
@@ -277,6 +283,20 @@ export function renderMapEditor(
   elevationFieldLabel.appendChild(elevationInput);
   elevationSection.appendChild(elevationFieldLabel);
   addPaletteItem(elevationSection, "Elevation Tool", null, (item) => selectTool({ kind: "elevation" }, item));
+
+  // --- Barrier (invisible movement/LOS/projectile blocker) ---
+  // Also applied to whatever's already at a cell rather than replacing it,
+  // same as Elevation — click a cell to toggle the flag on/off. Shown in
+  // this editor as a red overlay (see draw()) since it's otherwise
+  // invisible in actual gameplay; the intended use is hand-defining a hard
+  // edge (or any other invisible obstacle) on an otherwise-infinite map
+  // without needing a visible wall there.
+  const barrierSection = addPaletteTab("barrier", "Barrier");
+  const barrierHint = document.createElement("p");
+  barrierHint.className = "palette-empty";
+  barrierHint.textContent = "Click a cell to toggle an invisible movement/line-of-sight blocker on top of it.";
+  barrierSection.appendChild(barrierHint);
+  addPaletteItem(barrierSection, "Barrier Tool", null, (item) => selectTool({ kind: "blocksMovement" }, item));
 
   // --- Spawn (player start point) ---
   const spawnSection = addPaletteTab("spawn", "Spawn");
@@ -687,7 +707,8 @@ export function renderMapEditor(
     const { minCol, minRow, maxCol, maxRow } = visibleTileRange();
     try {
       const tiles = await fetchTiles(minCol, minRow, maxCol, maxRow);
-      for (const t of tiles) loadedTiles.set(tileKey(t.col, t.row), { tileType: t.tileType, elevation: t.elevation });
+      for (const t of tiles)
+        loadedTiles.set(tileKey(t.col, t.row), { tileType: t.tileType, elevation: t.elevation, blocksMovement: t.blocksMovement });
     } catch (err) {
       console.error("Failed to load map tiles:", err);
     }
@@ -806,6 +827,28 @@ export function renderMapEditor(
       for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
       ctx.closePath();
       ctx.stroke();
+
+      // Barrier cells are invisible in actual gameplay (see WorldGrid.
+      // blocksMovementAt) — this translucent red tint + hatching is
+      // editor-only, so the flag stays paintable/visible while authoring
+      // without ever showing up to players.
+      if (cell.blocksMovement) {
+        ctx.fillStyle = "rgba(220,30,30,0.4)";
+        ctx.beginPath();
+        ctx.moveTo(padded[0].x, padded[0].y);
+        for (let i = 1; i < padded.length; i++) ctx.lineTo(padded[i].x, padded[i].y);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(255,255,255,0.8)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(corners[0].x, corners[0].y);
+        ctx.lineTo(corners[2].x, corners[2].y);
+        ctx.moveTo(corners[1].x, corners[1].y);
+        ctx.lineTo(corners[3].x, corners[3].y);
+        ctx.stroke();
+      }
 
       if (cell.elevation !== 0 && zoom >= 0.35) {
         const fontSize = Math.max(8, Math.round(12 * zoom));
@@ -946,11 +989,18 @@ export function renderMapEditor(
   function applyToolAt(col: number, row: number) {
     if (tool.kind === "tile") {
       const current = cellAt(col, row);
-      dirtyTiles.set(tileKey(col, row), { tileType: tool.tileType, elevation: current.elevation });
+      dirtyTiles.set(tileKey(col, row), { tileType: tool.tileType, elevation: current.elevation, blocksMovement: current.blocksMovement });
     } else if (tool.kind === "elevation") {
       const current = cellAt(col, row);
       const elevation = Math.max(MIN_ELEVATION, Math.min(MAX_ELEVATION, Math.round(Number(elevationInput.value)) || 0));
-      dirtyTiles.set(tileKey(col, row), { tileType: current.tileType, elevation });
+      dirtyTiles.set(tileKey(col, row), { tileType: current.tileType, elevation, blocksMovement: current.blocksMovement });
+    } else if (tool.kind === "blocksMovement") {
+      const current = cellAt(col, row);
+      dirtyTiles.set(tileKey(col, row), {
+        tileType: current.tileType,
+        elevation: current.elevation,
+        blocksMovement: !current.blocksMovement,
+      });
     } else if (tool.kind === "player-spawn") {
       state.playerSpawnCol = col;
       state.playerSpawnRow = row;
@@ -1103,7 +1153,7 @@ export function renderMapEditor(
     };
     const tiles: MapTileDTO[] = [...dirtyTiles.entries()].map(([key, cell]) => {
       const [col, row] = key.split(",").map(Number);
-      return { col, row, tileType: cell.tileType, elevation: cell.elevation };
+      return { col, row, tileType: cell.tileType, elevation: cell.elevation, blocksMovement: cell.blocksMovement };
     });
 
     try {

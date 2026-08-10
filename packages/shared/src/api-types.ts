@@ -305,6 +305,9 @@ export interface MapTileDTO {
   row: number;
   tileType: number;
   elevation: number;
+  // Invisible movement/LOS/projectile blocker layered on top of whatever
+  // tileType/elevation this cell already has — see WorldGrid.blocksMovementAt.
+  blocksMovement: boolean;
 }
 
 // A tile entry with tileType equal to TileType.Grass (0) AND elevation

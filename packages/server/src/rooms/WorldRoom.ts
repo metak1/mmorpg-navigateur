@@ -28,8 +28,9 @@ import {
   MAX_PARTY_SIZE,
   MOVE_SPEED,
   resolveMovement,
-  getTileAt,
-  isWalkable,
+  isWalkableCell,
+  isWalkableAt,
+  isBlockedByBarrier,
   hasLineOfSight,
   ChunkTileCache,
   CHUNK_SIZE,
@@ -49,6 +50,7 @@ import {
   canLearnTalent,
   type JoinOptions,
   type MoveInputMessage,
+  type ZoneBlockedMessage,
   type CastInputMessage,
   type HealEventMessage,
   type GroundAoeEventMessage,
@@ -122,6 +124,11 @@ const CHUNK_PRELOAD_INTERVAL_MS = 500;
 // rolls only; once created, an ambient monster still respawns forever at
 // its rolled position via the same timer hand-placed spawns use.
 const MAX_AMBIENT_MONSTERS = 150;
+// Re-notification cooldown for ZoneBlockedMessage — holding a direction into
+// a barrier cell re-shows the notice at most this often, rather than once
+// per simulation tick.
+const ZONE_BLOCKED_NOTICE_INTERVAL_MS = 4000;
+const ZONE_BLOCKED_MESSAGE = "This zone hasn't been implemented yet.";
 
 type MonsterTemplateWithDrops = MonsterTemplate & { drops: MonsterDrop[] };
 
@@ -262,6 +269,8 @@ interface ProjectileRuntime {
 export class WorldRoom extends Room<RoomState> {
   static NAME = WORLD_ROOM;
   private inputs = new Map<string, MoveInputMessage>();
+  // Throttle for ZoneBlockedMessage — see updatePlayers's barrier check.
+  private lastZoneBlockedNoticeAt = new Map<string, number>();
   private lastCastAt = new Map<string, number>();
   private castingUntil = new Map<string, number>();
   private castTimeouts = new Map<string, Delayed>();
@@ -380,7 +389,7 @@ export class WorldRoom extends Room<RoomState> {
       const rows = await prisma.mapTile.findMany({
         where: { mapId: map.id, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
       });
-      return rows.map((r) => ({ col: r.col, row: r.row, tileType: r.tileType, elevation: r.elevation }));
+      return rows.map((r) => ({ col: r.col, row: r.row, tileType: r.tileType, elevation: r.elevation, blocksMovement: r.blocksMovement }));
     });
 
     await this.reloadSpells();
@@ -652,7 +661,7 @@ export class WorldRoom extends Room<RoomState> {
     for (let attempt = 0; attempt < 5; attempt++) {
       const col = chunkCol * CHUNK_SIZE + Math.floor(Math.random() * CHUNK_SIZE);
       const row = chunkRow * CHUNK_SIZE + Math.floor(Math.random() * CHUNK_SIZE);
-      if (isWalkable(this.chunkCache.tileAt(col, row))) {
+      if (isWalkableCell(this.chunkCache, col, row)) {
         spawnCol = col;
         spawnRow = row;
         break;
@@ -978,13 +987,24 @@ export class WorldRoom extends Room<RoomState> {
         this.interruptCast(sessionId);
       }
 
-      const resolved = resolveMovement(
-        this.chunkCache,
-        player.x,
-        player.y,
-        input.dx * MOVE_SPEED * dt,
-        input.dy * MOVE_SPEED * dt,
-      );
+      const dx = input.dx * MOVE_SPEED * dt;
+      const dy = input.dy * MOVE_SPEED * dt;
+      const resolved = resolveMovement(this.chunkCache, player.x, player.y, dx, dy);
+
+      // resolveMovement doesn't say *why* it clamped a move short — a real
+      // Wall/Water tile needs no extra feedback (the player can see it), but
+      // a barrier cell is invisible by design, so a bump against one gets an
+      // explicit notice instead of just silently refusing to move.
+      if (dx !== 0 || dy !== 0) {
+        if (isBlockedByBarrier(this.chunkCache, player.x + dx, player.y + dy)) {
+          const lastNotice = this.lastZoneBlockedNoticeAt.get(sessionId) ?? 0;
+          if (now - lastNotice > ZONE_BLOCKED_NOTICE_INTERVAL_MS) {
+            this.lastZoneBlockedNoticeAt.set(sessionId, now);
+            this.clients.getById(sessionId)?.send("zoneBlocked", { message: ZONE_BLOCKED_MESSAGE } satisfies ZoneBlockedMessage);
+          }
+        }
+      }
+
       player.x = resolved.x;
       player.y = resolved.y;
       player.direction = input.direction;
@@ -2383,7 +2403,7 @@ export class WorldRoom extends Room<RoomState> {
       const traveled = Math.hypot(projectile.x - runtime.spawnX, projectile.y - runtime.spawnY);
       let hit = false;
 
-      if (!isWalkable(getTileAt(this.chunkCache, projectile.x, projectile.y))) {
+      if (!isWalkableAt(this.chunkCache, projectile.x, projectile.y)) {
         hit = true;
       } else {
         for (const [monsterId, monster] of this.state.monsters) {
@@ -2510,6 +2530,7 @@ export class WorldRoom extends Room<RoomState> {
     this.learnedTalents.delete(client.sessionId);
     this.talentBonus.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
+    this.lastZoneBlockedNoticeAt.delete(client.sessionId);
     this.invulnerableUntil.delete(client.sessionId);
     this.interruptCast(client.sessionId);
     this.gcdUntil.delete(client.sessionId);

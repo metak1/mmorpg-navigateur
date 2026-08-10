@@ -293,6 +293,11 @@ model MapTile {
   // blocked (see shared/src/map.ts) and higher tiles render visually
   // raised in the isometric client.
   elevation Int     @default(0)
+  // Invisible movement/projectile/line-of-sight blocker, independent of
+  // tileType/elevation — lets an admin hand-author a hard edge (or any other
+  // invisible obstacle) on top of an already-painted tile without changing
+  // how it looks. See shared/src/map.ts's WorldGrid.blocksMovementAt.
+  blocksMovement Boolean @default(false)
 
   @@unique([mapId, col, row])
 }
