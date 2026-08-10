@@ -298,6 +298,9 @@ model MapTile {
   // invisible obstacle) on top of an already-painted tile without changing
   // how it looks. See shared/src/map.ts's WorldGrid.blocksMovementAt.
   blocksMovement Boolean @default(false)
+  // Decorative furniture/dungeon-dressing painted onto this cell (see
+  // shared/src/api-types.ts's PropType) — purely visual, null means none.
+  propType       String?
 
   @@unique([mapId, col, row])
 }

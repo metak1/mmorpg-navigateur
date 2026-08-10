@@ -52,7 +52,6 @@ import {
   hasLineOfSight,
   TERRAIN_DEPTH,
   UI_DEPTH,
-  TILE_COLORS,
   TileType,
 } from "shared";
 import { connectToWorld, joinRoomById } from "../net/RoomClient.js";
@@ -64,6 +63,20 @@ import { dungeonPrompt } from "../ui/DungeonPrompt.js";
 import { groupFinder, type GroupFinderData, type GroupFinderHandlers } from "../ui/GroupFinder.js";
 import { partyFrames, type PartyFrameMember } from "../ui/PartyFrames.js";
 import { dungeonObjectives, type DungeonObjectiveView } from "../ui/DungeonObjectives.js";
+import {
+  preloadGameAssets,
+  CLASS_TEXTURE_KEYS,
+  MONSTER_TEXTURE_KEYS,
+  NPC_TEXTURE_KEYS,
+  DEFAULT_CLASS_TEXTURE_KEY,
+  DEFAULT_MONSTER_TEXTURE_KEY,
+  DEFAULT_NPC_TEXTURE_KEY,
+  TERRAIN_FULL_TEXTURE_KEYS,
+  TERRAIN_CUBE_SOURCE_WIDTH,
+  TERRAIN_CUBE_SOURCE_HEIGHT,
+  TERRAIN_CUBE_SOURCE_TOP_HEIGHT,
+  PROP_TEXTURE_KEYS,
+} from "../assets.js";
 
 const REMOTE_SMOOTHING = 0.25; // lerp factor applied per frame toward server position
 // The local player predicts its own movement (see updateInput) and never
@@ -93,7 +106,6 @@ const NAME_TEXT_OFFSET_Y = CAST_BAR_OFFSET_Y + 12;
 // cliff tall enough to hide them (see isHiddenByTerrain) — faded rather
 // than fully invisible so the entity doesn't just vanish/pop.
 const OCCLUDED_ALPHA = 0.25;
-const MONSTER_COLOR = 0xff3333;
 const MONSTER_SLOWED_COLOR = 0x5599ff;
 const TARGET_RING_COLOR = 0xffff00;
 const TARGET_RING_SIZE = 36;
@@ -118,7 +130,7 @@ const CHUNK_MARGIN = 1;
 type Target = { kind: "monster"; id: string } | { kind: "self" };
 
 interface HpBarHolder {
-  rect: Phaser.GameObjects.Rectangle;
+  rect: Phaser.GameObjects.Image;
   hpBarBg: Phaser.GameObjects.Rectangle;
   hpBarFill: Phaser.GameObjects.Rectangle;
   nameText: Phaser.GameObjects.Text;
@@ -170,7 +182,7 @@ interface ProjectileEntity {
 }
 
 interface NpcEntity {
-  rect: Phaser.GameObjects.Rectangle;
+  rect: Phaser.GameObjects.Image;
   nameText: Phaser.GameObjects.Text;
 }
 
@@ -218,11 +230,19 @@ export class WorldScene extends Phaser.Scene {
   private roomId?: string;
   private dungeonMapId?: string;
   private chunkCache!: ChunkTileCache;
-  // Solid fill color for the "riser" face drawn between two adjacent tiles
-  // at different elevation — admin-configured per map (packages/admin/src/mapEditor.ts),
-  // e.g. brown for dirt, gray for stone.
-  private cliffColor = 0x6b4a2f;
-  private chunkLayers = new Map<string, Phaser.GameObjects.Graphics>();
+  // Every terrain GameObject a chunk owns (its tiles' cube sprites) — NOT
+  // wrapped in a Container. A container has one depth for all its children,
+  // but a tile's cube sprite extends well below its own diamond (the
+  // baked-in side faces), overlapping whatever chunk is drawn "in front" of
+  // it on screen — which, across a chunk boundary, has nothing to do with
+  // which chunk's container happened to be created first. Each tile gets
+  // its own depth instead (see createChunkLayer) so Phaser's normal
+  // scene-wide depth sort orders every tile correctly regardless of chunk
+  // membership.
+  private chunkLayers = new Map<string, Phaser.GameObjects.GameObject[]>();
+  // Decorative furniture sprites for each chunk — destroyed alongside the
+  // chunk's terrain objects when it unloads.
+  private chunkPropSprites = new Map<string, Phaser.GameObjects.Image[]>();
   // Chunks that were rendered before their real (possibly painted) data had
   // finished loading — re-checked each refresh tick and re-drawn once the
   // underlying ChunkTileCache actually has them, so a chunk painted by an
@@ -282,8 +302,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    // No tileset image needed — terrain renders as hand-drawn iso diamonds
-    // (see createChunkLayer) colored via tileColors.ts.
+    preloadGameAssets(this);
   }
 
   async create() {
@@ -315,7 +334,6 @@ export class WorldScene extends Phaser.Scene {
     this.chunkCache = new ChunkTileCache(activeMap.tileSize, (minCol, minRow, maxCol, maxRow) =>
       fetchMapTiles(activeMap.mapId, minCol, minRow, maxCol, maxRow),
     );
-    this.cliffColor = activeMap.cliffColor;
     for (const spell of spells) {
       let classSpells = this.spellDefsByClass.get(spell.classId);
       if (!classSpells) {
@@ -509,9 +527,14 @@ export class WorldScene extends Phaser.Scene {
 
     $(room.state).players.onAdd((player: Player, sessionId: string) => {
       const isLocal = sessionId === room.sessionId;
-      const color = isLocal ? 0x00ff88 : 0xff8800;
       const p = this.projectEntity(player.x, player.y);
-      const rect = this.add.rectangle(p.x, p.y, 24, 24, color).setDepth(p.depth);
+      const textureKey = CLASS_TEXTURE_KEYS[player.className] ?? DEFAULT_CLASS_TEXTURE_KEY;
+      const rect = this.add.image(p.x, p.y, textureKey).setDisplaySize(32, 32).setDepth(p.depth);
+      // Same sprite either way (classes aren't visually distinguished by
+      // "whose character is whose") — a faint tint on everyone else is the
+      // only thing that used to tell "me" apart from other players when both
+      // were flat-colored rectangles, and still does the job here.
+      if (!isLocal) rect.setTint(0xffaa66);
       const { hpBarBg, hpBarFill, nameText } = this.createHpBar(p.x, p.y, player.name);
       const entity: PlayerEntity = {
         rect,
@@ -571,6 +594,13 @@ export class WorldScene extends Phaser.Scene {
       $(player).onChange(() => {
         entity.targetX = player.x;
         entity.targetY = player.y;
+        // The sprite has no left/right-facing variants, just one forward
+        // pose — flipping it horizontally is the cheap way to still show
+        // facing for the two directions where it's visually obvious.
+        // up/down leave whatever flip was already showing rather than
+        // resetting it, since there's no "back" pose to flip to either.
+        if (player.direction === "left") rect.setFlipX(true);
+        else if (player.direction === "right") rect.setFlipX(false);
         entity.hp = player.hp;
         // maxHp changes mid-session on level-up — keep the cached copy in
         // sync so the HP bar's fraction doesn't render against a stale value.
@@ -606,7 +636,8 @@ export class WorldScene extends Phaser.Scene {
 
     $(room.state).monsters.onAdd((monster: Monster, id: string) => {
       const p = this.projectEntity(monster.x, monster.y);
-      const rect = this.add.rectangle(p.x, p.y, 28, 28, MONSTER_COLOR).setDepth(p.depth);
+      const textureKey = MONSTER_TEXTURE_KEYS[monster.name] ?? DEFAULT_MONSTER_TEXTURE_KEY;
+      const rect = this.add.image(p.x, p.y, textureKey).setDisplaySize(32, 32).setDepth(p.depth);
       rect.setInteractive({ useHandCursor: true });
       rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
         if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
@@ -635,12 +666,19 @@ export class WorldScene extends Phaser.Scene {
       let lastHp = monster.hp;
       let wasCasting = monster.casting;
       $(monster).onChange(() => {
+        // Monsters have no synced facing (unlike Player, nothing server-side
+        // ever needed their direction before now) — derived from which way
+        // this update actually moved them instead, comparing against the
+        // still-old entity.targetX before it's overwritten below.
+        if (monster.x > entity.targetX) rect.setFlipX(false);
+        else if (monster.x < entity.targetX) rect.setFlipX(true);
         entity.targetX = monster.x;
         entity.targetY = monster.y;
         entity.hp = monster.hp;
         entity.attackRange = monster.attackRange;
         hpBarFill.width = HP_BAR_WIDTH * Math.max(0, monster.hp / entity.maxHp);
-        rect.setFillStyle(monster.slowed ? MONSTER_SLOWED_COLOR : MONSTER_COLOR);
+        if (monster.slowed) rect.setTint(MONSTER_SLOWED_COLOR);
+        else rect.clearTint();
 
         if (monster.hp < lastHp) {
           this.tweens.add({ targets: rect, alpha: 0.15, duration: 60, yoyo: true, repeat: 1 });
@@ -684,7 +722,13 @@ export class WorldScene extends Phaser.Scene {
 
     $(room.state).npcs.onAdd((npc: Npc, id: string) => {
       const p = this.projectEntity(npc.x, npc.y);
-      const rect = this.add.rectangle(p.x, p.y, 26, 26, npc.color).setDepth(p.depth);
+      const mappedKey = NPC_TEXTURE_KEYS[npc.name];
+      const rect = this.add.image(p.x, p.y, mappedKey ?? DEFAULT_NPC_TEXTURE_KEY).setDisplaySize(32, 32).setDepth(p.depth);
+      // npc.color is an admin-authored per-template color, previously the
+      // NPC's entire fill — now only used as a tint for names that don't
+      // have a dedicated sprite above, so an admin-added NPC is still at
+      // least distinguishable by color instead of all looking identical.
+      if (!mappedKey) rect.setTint(npc.color);
       rect.setInteractive({ useHandCursor: true });
       rect.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
         if (this.aimingSpell) return; // let the scene-level handler treat this as a placement click
@@ -824,40 +868,72 @@ export class WorldScene extends Phaser.Scene {
       }
     }
 
-    for (const [key, layer] of this.chunkLayers) {
+    for (const key of this.chunkLayers.keys()) {
       if (visibleKeys.has(key)) continue;
-      layer.destroy();
-      this.chunkLayers.delete(key);
+      this.destroyChunkLayer(key);
       this.pendingChunkLoads.delete(key);
     }
 
     for (const key of [...this.pendingChunkLoads]) {
       const [chunkCol, chunkRow] = key.split(",").map(Number);
       if (!this.chunkCache.isChunkLoaded(chunkCol * CHUNK_SIZE, chunkRow * CHUNK_SIZE)) continue;
-      this.chunkLayers.get(key)?.destroy();
-      this.chunkLayers.delete(key);
+      this.destroyChunkLayer(key);
       this.pendingChunkLoads.delete(key);
       this.createChunkLayer(key, chunkCol, chunkRow);
     }
   }
 
-  // Draws a chunk as CHUNK_SIZE×CHUNK_SIZE hand-filled iso diamonds (one
-  // per tile) instead of a Phaser Tilemap — projecting each tile's 4 raw
-  // world-space corners is what actually produces the diamond shape.
+  // Tears down everything createChunkLayer built for one chunk — the
+  // terrain objects plus the prop sprites.
+  private destroyChunkLayer(key: string) {
+    for (const obj of this.chunkLayers.get(key) ?? []) obj.destroy();
+    this.chunkLayers.delete(key);
+    for (const sprite of this.chunkPropSprites.get(key) ?? []) sprite.destroy();
+    this.chunkPropSprites.delete(key);
+  }
+
+  // Draws a chunk as CHUNK_SIZE×CHUNK_SIZE real voxel blocks (one per tile)
+  // instead of a Phaser Tilemap — projecting each tile's 4 raw world-space
+  // corners is what actually produces the diamond shape a block's top face
+  // sits in.
+  //
+  // Each tile is exactly one full Kenney "Isometric Blocks" cube sprite (top
+  // face plus its two baked-in south/east side faces — see assets.ts), and
+  // ONLY that sprite — no hand-drawn vector fill of any kind anymore, for
+  // any elevation difference. Several custom-drawn fallbacks were tried on
+  // top of the cube (a flat-color fill for cliffs taller than one cube's own
+  // sides, another for north/west drops the cube art can't show a face for
+  // at all) and all ended up re-adding the exact kind of hand-coded vertical
+  // geometry the move to real block sprites was meant to replace. Pure
+  // block rendering: a north/west drop shows nothing (this camera angle
+  // can't see that face on a real cube either — physically correct, if a
+  // little less obvious as terrain), and a cliff steeper than one cube
+  // covers shows a plain gap rather than another shape entirely. Both are
+  // the accepted tradeoff for a map built entirely out of real cube sprites.
   private createChunkLayer(key: string, chunkCol: number, chunkRow: number) {
     const tileSize = this.chunkCache.tileSize;
-    const graphics = this.add.graphics();
+    // Every object this chunk creates, so destroyChunkLayer can tear them
+    // all down — NOT a Container (see the chunkLayers field comment for
+    // why: a cube's baked-in side faces extend past its own tile into
+    // whatever's drawn "in front" of it, which needs a real per-tile depth
+    // to resolve correctly across chunk boundaries, not one shared value).
+    const terrainObjects: Phaser.GameObjects.GameObject[] = [];
     // TERRAIN_DEPTH is a fixed floor far below any world-tier entity depth
-    // (which is unbounded — this world has no edges), so chunks always
-    // render behind everything regardless of creation order or how far a
-    // player has traveled from spawn.
-    graphics.setDepth(TERRAIN_DEPTH);
+    // (which is unbounded — this world has no edges) or col+row could ever
+    // reach, so terrain always renders behind every entity regardless of
+    // how far a player has traveled from spawn.
 
-    // Nudges each corner outward from the tile's center by a hair, so
-    // adjacent diamonds' fills overlap slightly instead of leaving sub-pixel
-    // seams — a common vector-fill artifact, more visible here since these
-    // are flat placeholder colors with no border art to hide it.
-    const SEAM_PAD = 1;
+    // +1px overscale on every sprite's display size, same seam-hiding
+    // trick the old flat-fill version used (SEAM_PAD) — adjacent tiles
+    // overlap by a hair instead of leaving a hairline gap at shared edges.
+    const diamondW = tileSize * 2 + 1;
+    const scale = diamondW / TERRAIN_CUBE_SOURCE_WIDTH;
+    const fullDisplayH = TERRAIN_CUBE_SOURCE_HEIGHT * scale;
+    // Fraction down the "full" cube image where the top face's own vertical
+    // center sits — origin is set to this so positioning at a tile's
+    // (centerX, centerY) lines the top face up exactly where the old flat
+    // diamond used to be, with the baked-in sides simply hanging below it.
+    const topOriginYFraction = TERRAIN_CUBE_SOURCE_TOP_HEIGHT / 2 / TERRAIN_CUBE_SOURCE_HEIGHT;
 
     // Flat tiles never overlap on screen, so draw order didn't matter
     // before elevation existed. An elevated tile's diamond IS shifted up
@@ -872,47 +948,13 @@ export class WorldScene extends Phaser.Scene {
     }
     cells.sort((a, b) => a.r + a.c - (b.r + b.c));
 
-    // Fills the vertical gap between two adjacent tiles at different
-    // elevations with a solid color — a simplified "riser" wall face, not
-    // true 3D geometry. (worldX1,worldY1)-(worldX2,worldY2) is their shared
-    // edge in raw world space; topElevation belongs to the higher (current)
-    // tile, bottomElevation to the lower neighbor. riserColor is the map's
-    // generic dirt cliffColor for ordinary terrain, but a Wall tile uses its
-    // own flat color instead — a wall block is meant to read as one solid
-    // color regardless of which elevation it happens to sit at, not grow a
-    // dirt-colored base the moment it's raised.
-    const drawCliffFace = (
-      worldX1: number,
-      worldY1: number,
-      worldX2: number,
-      worldY2: number,
-      topElevation: number,
-      bottomElevation: number,
-      riserColor: number,
-    ) => {
-      const topShift = isoElevationOffset(topElevation, tileSize);
-      const bottomShift = isoElevationOffset(bottomElevation, tileSize);
-      const p1 = isoProject(worldX1, worldY1);
-      const p2 = isoProject(worldX2, worldY2);
-      graphics.fillStyle(riserColor, 1);
-      graphics.fillPoints(
-        [
-          { x: p1.x, y: p1.y - topShift },
-          { x: p2.x, y: p2.y - topShift },
-          { x: p2.x, y: p2.y - bottomShift },
-          { x: p1.x, y: p1.y - bottomShift },
-        ],
-        true,
-      );
-    };
+    const propSprites: Phaser.GameObjects.Image[] = [];
 
     for (const { r, c } of cells) {
       const col = chunkCol * CHUNK_SIZE + c;
       const row = chunkRow * CHUNK_SIZE + r;
       const elevation = this.chunkCache.elevationAt(col, row);
       const tileType = this.chunkCache.tileAt(col, row);
-      const color = TILE_COLORS[tileType] ?? 0x000000;
-      const riserColor = tileType === TileType.Wall ? color : this.cliffColor;
       const elevationShift = isoElevationOffset(elevation, tileSize);
 
       const worldLeft = col * tileSize;
@@ -926,71 +968,54 @@ export class WorldScene extends Phaser.Scene {
 
       const centerX = (corners[0].x + corners[2].x) / 2;
       const centerY = (corners[0].y + corners[2].y) / 2;
-      const padded = corners.map((p) => {
-        const dx = p.x - centerX;
-        const dy = p.y - centerY;
-        const len = Math.hypot(dx, dy) || 1;
-        return { x: p.x + (dx / len) * SEAM_PAD, y: p.y + (dy / len) * SEAM_PAD };
-      });
 
-      graphics.fillStyle(color, 1);
-      graphics.fillPoints(padded, true);
+      // Exactly one cube per tile, never stacked. Stacking extra cubes (or
+      // a dedicated side-only crop) to reach a lower neighbor more than one
+      // cube's-worth down was tried and looked worse than this: this cube
+      // art bakes in shading meant for a single standalone icon, and EVERY
+      // repeat of it — top faces tiled flat, side crops stacked, or full
+      // cubes stacked — reproduces that shading as a visible seam/triangle.
+      // One cube per tile has no repeat, so no seam. The tradeoff is a
+      // tall cliff (more than ~2 elevation steps in one jump) shows a gap
+      // below this cube's own natural sides instead of a solid wall — rare
+      // in practice (typical terrain steps 1-2 levels at a time) and a
+      // plain visual gap reads as far less obviously broken than the
+      // shading artifact did.
+      // A real per-tile depth (not a shared container/chunk-level value) —
+      // see the chunkLayers field comment for why this specific value
+      // matters now that a cube's sides can visually reach into a
+      // neighboring tile's space, possibly in another chunk: Phaser sorts
+      // every top-level GameObject in the scene by depth each frame, so
+      // this alone is what makes two adjacent tiles — regardless of which
+      // chunk either belongs to — composite in the correct order.
+      const tileDepth = TERRAIN_DEPTH + col + row;
 
-      // Cliff faces on the two screen-front-facing edges (east + south —
-      // the ones meeting at this diamond's frontmost/bottom corner) —
-      // drawn wherever this tile sits higher than that neighbor, regardless
-      // of how big the gap is (only *movement* is limited to a 1-level
-      // step, terrain generation/painting isn't).
-      const northElevation = this.chunkCache.elevationAt(col, row - 1);
-      const eastElevation = this.chunkCache.elevationAt(col + 1, row);
-      const southElevation = this.chunkCache.elevationAt(col, row + 1);
-      const westElevation = this.chunkCache.elevationAt(col - 1, row);
-      if (elevation > eastElevation) {
-        drawCliffFace(
-          worldLeft + tileSize,
-          worldTop,
-          worldLeft + tileSize,
-          worldTop + tileSize,
-          elevation,
-          eastElevation,
-          riserColor,
-        );
-      }
-      if (elevation > southElevation) {
-        drawCliffFace(
-          worldLeft,
-          worldTop + tileSize,
-          worldLeft + tileSize,
-          worldTop + tileSize,
-          elevation,
-          southElevation,
-          riserColor,
-        );
-      }
+      const fullKey = TERRAIN_FULL_TEXTURE_KEYS[tileType] ?? TERRAIN_FULL_TEXTURE_KEYS[TileType.Grass];
+      const fullImg = this.add
+        .image(centerX, centerY, fullKey)
+        .setOrigin(0.5, topOriginYFraction)
+        .setDisplaySize(diamondW, fullDisplayH)
+        .setDepth(tileDepth);
+      terrainObjects.push(fullImg);
 
-      // A thin line along whichever top edges border a differently-elevated
-      // neighbor, on ALL FOUR sides — south/east already get a full cliff
-      // wall above, but north/west (this projection's "back" edges, where a
-      // full wall would look wrong/inside-out) still need *some* boundary
-      // marker, or two same-colored tiles at different heights are
-      // otherwise indistinguishable there.
-      graphics.lineStyle(1, 0x000000, 0.35);
-      const topEdges: Array<[{ x: number; y: number }, { x: number; y: number }, number]> = [
-        [corners[0], corners[1], northElevation],
-        [corners[1], corners[2], eastElevation],
-        [corners[2], corners[3], southElevation],
-        [corners[3], corners[0], westElevation],
-      ];
-      for (const [from, to, neighborElevation] of topEdges) {
-        if (neighborElevation === elevation) continue;
-        graphics.beginPath();
-        graphics.moveTo(from.x, from.y);
-        graphics.lineTo(to.x, to.y);
-        graphics.strokePath();
+      // Decorative furniture (see shared/src/api-types.ts's PropType) — a
+      // real projectEntity-style depth (not tileDepth) since, unlike
+      // terrain, a prop needs to interleave with moving players/monsters
+      // (walking in front of or behind a table), not with other tiles.
+      const propType = this.chunkCache.propTypeAt(col, row);
+      if (propType) {
+        const rawCenterProj = isoProject(worldLeft + tileSize / 2, worldTop + tileSize / 2);
+        const propImg = this.add
+          .image(centerX, centerY, PROP_TEXTURE_KEYS[propType])
+          .setOrigin(0.5, 0.85)
+          .setDisplaySize(tileSize * 0.9, tileSize * 0.9)
+          .setDepth(rawCenterProj.y);
+        propSprites.push(propImg);
       }
     }
 
-    this.chunkLayers.set(key, graphics);
+    this.chunkLayers.set(key, terrainObjects);
+    this.chunkPropSprites.set(key, propSprites);
 
     if (!this.chunkCache.isChunkLoaded(chunkCol * CHUNK_SIZE, chunkRow * CHUNK_SIZE)) {
       this.pendingChunkLoads.add(key);

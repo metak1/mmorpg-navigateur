@@ -300,6 +300,13 @@ export interface ActiveMapResponse {
   cliffColor: number;
 }
 
+// Decorative furniture/dungeon-dressing an admin can paint onto a tile —
+// purely visual (see client/src/assets.ts's PROP_TEXTURE_KEYS), no gameplay
+// effect of its own. Pair with blocksMovement on the same cell if it should
+// also be solid (e.g. a dresser blocking a doorway).
+export const PROP_TYPES = ["table", "chest", "dresser", "barrel", "torch", "door", "fence", "gravestone"] as const;
+export type PropType = (typeof PROP_TYPES)[number];
+
 export interface MapTileDTO {
   col: number;
   row: number;
@@ -308,6 +315,7 @@ export interface MapTileDTO {
   // Invisible movement/LOS/projectile blocker layered on top of whatever
   // tileType/elevation this cell already has — see WorldGrid.blocksMovementAt.
   blocksMovement: boolean;
+  propType: PropType | null;
 }
 
 // A tile entry with tileType equal to TileType.Grass (0) AND elevation

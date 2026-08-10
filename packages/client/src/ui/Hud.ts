@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { GLOBAL_COOLDOWN_MS, UI_DEPTH, type SpellDef, type SpellId } from "shared";
+import { SPELL_KIND_ICON_KEYS } from "../assets.js";
 
 const HP_BAR_X = 16;
 const HP_BAR_BOTTOM_MARGIN = 40; // distance from the bottom edge to the bar's vertical center
@@ -22,7 +23,7 @@ const CAST_BAR_HEIGHT = 14;
 type Visible = Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text;
 
 interface SpellSlot {
-  icon: Phaser.GameObjects.Rectangle;
+  icon: Phaser.GameObjects.Image;
   cooldownOverlay: Phaser.GameObjects.Rectangle;
   cooldownText: Phaser.GameObjects.Text;
   cooldownMs: number;
@@ -93,7 +94,14 @@ export class Hud {
       const y = slotY + SLOT_SIZE / 2;
       const iconBottom = y + SLOT_ICON_SIZE / 2;
 
-      const icon = scene.add.rectangle(x, y, SLOT_ICON_SIZE, SLOT_ICON_SIZE, 0x444444).setScrollFactor(0).setDepth(UI_DEPTH);
+      // Texture is a placeholder until setSpellDefs assigns the real
+      // per-kind icon (see SPELL_KIND_ICON_KEYS) — spell defs load
+      // asynchronously and aren't known yet at construction time.
+      const icon = scene.add
+        .image(x, y, SPELL_KIND_ICON_KEYS.single)
+        .setDisplaySize(SLOT_ICON_SIZE, SLOT_ICON_SIZE)
+        .setScrollFactor(0)
+        .setDepth(UI_DEPTH);
       if (onSlotClick) {
         icon.setInteractive({ useHandCursor: true }).on("pointerdown", (pointer: Phaser.Input.Pointer) => {
           if (pointer.leftButtonDown()) onSlotClick(spellId);
@@ -165,7 +173,7 @@ export class Hud {
       if (!def) continue;
       slot.cooldownMs = def.cooldownMs;
       slot.castTimeMs = def.castTimeMs;
-      slot.icon.setFillStyle(def.color);
+      slot.icon.setTexture(SPELL_KIND_ICON_KEYS[def.kind]);
     }
   }
 

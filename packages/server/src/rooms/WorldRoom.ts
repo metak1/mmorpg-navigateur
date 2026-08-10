@@ -51,6 +51,7 @@ import {
   type JoinOptions,
   type MoveInputMessage,
   type ZoneBlockedMessage,
+  type PropType,
   type CastInputMessage,
   type HealEventMessage,
   type GroundAoeEventMessage,
@@ -389,7 +390,14 @@ export class WorldRoom extends Room<RoomState> {
       const rows = await prisma.mapTile.findMany({
         where: { mapId: map.id, col: { gte: minCol, lte: maxCol }, row: { gte: minRow, lte: maxRow } },
       });
-      return rows.map((r) => ({ col: r.col, row: r.row, tileType: r.tileType, elevation: r.elevation, blocksMovement: r.blocksMovement }));
+      return rows.map((r) => ({
+        col: r.col,
+        row: r.row,
+        tileType: r.tileType,
+        elevation: r.elevation,
+        blocksMovement: r.blocksMovement,
+        propType: r.propType as PropType | null,
+      }));
     });
 
     await this.reloadSpells();

@@ -1,5 +1,5 @@
-import { TileType, isoProject, isoUnproject, isoElevationOffset, TILE_COLORS as TILE_COLORS_HEX } from "shared";
-import type { GameMapDTO, GameMapInput, MapTileDTO, MonsterTemplateDTO, NpcTemplateDTO, DungeonObjectiveKind } from "shared";
+import { TileType, PROP_TYPES, isoProject, isoUnproject, isoElevationOffset, TILE_COLORS as TILE_COLORS_HEX } from "shared";
+import type { GameMapDTO, GameMapInput, MapTileDTO, MonsterTemplateDTO, NpcTemplateDTO, DungeonObjectiveKind, PropType } from "shared";
 
 // Fixed viewport size in pixels — the world itself has no size limit, this
 // is just how much of it the editor shows at once. `zoom` (canvas pixels
@@ -23,11 +23,37 @@ const MAX_VISIBLE_TILES_PER_AXIS = 125;
 const SEAM_PAD = 1;
 
 // ctx.fillStyle wants "#rrggbb"; the shared palette is Phaser-style numeric
-// 0xrrggbb (packages/shared/src/tileColors.ts) — same source either way, so
-// the editor's preview and the actual game always agree on tile color.
+// 0xrrggbb (packages/shared/src/tileColors.ts) — same source either way.
+// Flat colors here vs. the actual game's real voxel-block sprites (see
+// client/src/scenes/WorldScene.ts's createChunkLayer) is a deliberate
+// simplification, not a bug — this editor is a fast, schematic top-down
+// view for laying out a map, not a pixel-accurate preview of it.
 const TILE_COLORS: Record<number, string> = Object.fromEntries(
   Object.entries(TILE_COLORS_HEX).map(([key, hex]) => [key, `#${hex.toString(16).padStart(6, "0")}`]),
 );
+
+// Prop icons are loaded once, up front — draw() is called on every
+// pan/zoom/paint, so it can't afford to construct a new Image (and wait on
+// its onload) per call. A prop painted before its icon has finished loading
+// just draws nothing for a frame or two; draw() re-runs constantly anyway
+// (every pan/zoom/paint) so it self-corrects the moment it's ready.
+const PROP_ICON_PATHS: Record<PropType, string> = {
+  table: "/assets/props/table.png",
+  chest: "/assets/props/chest.png",
+  dresser: "/assets/props/dresser.png",
+  barrel: "/assets/props/barrel.png",
+  torch: "/assets/props/torch.png",
+  door: "/assets/props/door.png",
+  fence: "/assets/props/fence.png",
+  gravestone: "/assets/props/gravestone.png",
+};
+const PROP_ICONS: Record<PropType, HTMLImageElement> = Object.fromEntries(
+  PROP_TYPES.map((type) => {
+    const img = new Image();
+    img.src = PROP_ICON_PATHS[type];
+    return [type, img];
+  }),
+) as Record<PropType, HTMLImageElement>;
 
 function numberToCssColor(hex: number): string {
   return `#${hex.toString(16).padStart(6, "0")}`;
@@ -48,6 +74,7 @@ type Tool =
   | { kind: "tile"; tileType: number }
   | { kind: "elevation" }
   | { kind: "blocksMovement" }
+  | { kind: "prop"; propType: PropType | null }
   | { kind: "player-spawn" }
   | { kind: "monster-spawn"; monsterTemplateId: string; isBoss: boolean }
   | { kind: "npc-spawn"; npcTemplateId: string }
@@ -61,9 +88,13 @@ interface CellState {
   // a red overlay (see draw()) so it stays paintable despite being invisible
   // in the actual game.
   blocksMovement: boolean;
+  // Decorative furniture painted on top of this cell — purely visual, no
+  // gameplay effect (pair with blocksMovement on the same cell if it should
+  // also be solid). See client/src/assets.ts's PROP_TEXTURE_KEYS.
+  propType: PropType | null;
 }
 
-const DEFAULT_CELL: CellState = { tileType: TileType.Grass, elevation: 0, blocksMovement: false };
+const DEFAULT_CELL: CellState = { tileType: TileType.Grass, elevation: 0, blocksMovement: false, propType: null };
 const MIN_ELEVATION = -4;
 const MAX_ELEVATION = 4;
 
@@ -297,6 +328,32 @@ export function renderMapEditor(
   barrierHint.textContent = "Click a cell to toggle an invisible movement/line-of-sight blocker on top of it.";
   barrierSection.appendChild(barrierHint);
   addPaletteItem(barrierSection, "Barrier Tool", null, (item) => selectTool({ kind: "blocksMovement" }, item));
+
+  // --- Furniture (decorative props, for building houses/dungeons) ---
+  // Also applied on top of whatever's already at a cell, same as Elevation/
+  // Barrier — click a cell to set/replace its prop, or use Clear to remove
+  // one. Purely visual (see PropType) — pair with the Barrier tool on the
+  // same cell if a piece should also block movement (e.g. a dresser
+  // blocking a doorway).
+  const furnitureSection = addPaletteTab("furniture", "Furniture");
+  const furnitureHint = document.createElement("p");
+  furnitureHint.className = "palette-empty";
+  furnitureHint.textContent = "Click a cell to place/replace a decorative prop on top of it.";
+  furnitureSection.appendChild(furnitureHint);
+  const PROP_LABELS: Record<PropType, string> = {
+    table: "Table",
+    chest: "Chest",
+    dresser: "Dresser",
+    barrel: "Barrel",
+    torch: "Torch",
+    door: "Door",
+    fence: "Fence",
+    gravestone: "Gravestone",
+  };
+  for (const propType of PROP_TYPES) {
+    addPaletteItem(furnitureSection, PROP_LABELS[propType], null, (item) => selectTool({ kind: "prop", propType }, item));
+  }
+  addPaletteItem(furnitureSection, "Clear Furniture", null, (item) => selectTool({ kind: "prop", propType: null }, item));
 
   // --- Spawn (player start point) ---
   const spawnSection = addPaletteTab("spawn", "Spawn");
@@ -708,7 +765,12 @@ export function renderMapEditor(
     try {
       const tiles = await fetchTiles(minCol, minRow, maxCol, maxRow);
       for (const t of tiles)
-        loadedTiles.set(tileKey(t.col, t.row), { tileType: t.tileType, elevation: t.elevation, blocksMovement: t.blocksMovement });
+        loadedTiles.set(tileKey(t.col, t.row), {
+          tileType: t.tileType,
+          elevation: t.elevation,
+          blocksMovement: t.blocksMovement,
+          propType: t.propType,
+        });
     } catch (err) {
       console.error("Failed to load map tiles:", err);
     }
@@ -850,6 +912,18 @@ export function renderMapEditor(
         ctx.stroke();
       }
 
+      if (cell.propType) {
+        const icon = PROP_ICONS[cell.propType];
+        // naturalWidth stays 0 until the image has actually finished
+        // loading — drawImage on an unloaded image silently no-ops in some
+        // browsers but throws in others, so this is a real guard, not
+        // defensive-for-its-own-sake.
+        if (icon.naturalWidth > 0) {
+          const iconSize = tileSize * zoom * 0.8;
+          ctx.drawImage(icon, centerX - iconSize / 2, centerY - iconSize / 2, iconSize, iconSize);
+        }
+      }
+
       if (cell.elevation !== 0 && zoom >= 0.35) {
         const fontSize = Math.max(8, Math.round(12 * zoom));
         ctx.font = `${fontSize}px sans-serif`;
@@ -989,17 +1063,36 @@ export function renderMapEditor(
   function applyToolAt(col: number, row: number) {
     if (tool.kind === "tile") {
       const current = cellAt(col, row);
-      dirtyTiles.set(tileKey(col, row), { tileType: tool.tileType, elevation: current.elevation, blocksMovement: current.blocksMovement });
+      dirtyTiles.set(tileKey(col, row), {
+        tileType: tool.tileType,
+        elevation: current.elevation,
+        blocksMovement: current.blocksMovement,
+        propType: current.propType,
+      });
     } else if (tool.kind === "elevation") {
       const current = cellAt(col, row);
       const elevation = Math.max(MIN_ELEVATION, Math.min(MAX_ELEVATION, Math.round(Number(elevationInput.value)) || 0));
-      dirtyTiles.set(tileKey(col, row), { tileType: current.tileType, elevation, blocksMovement: current.blocksMovement });
+      dirtyTiles.set(tileKey(col, row), {
+        tileType: current.tileType,
+        elevation,
+        blocksMovement: current.blocksMovement,
+        propType: current.propType,
+      });
     } else if (tool.kind === "blocksMovement") {
       const current = cellAt(col, row);
       dirtyTiles.set(tileKey(col, row), {
         tileType: current.tileType,
         elevation: current.elevation,
         blocksMovement: !current.blocksMovement,
+        propType: current.propType,
+      });
+    } else if (tool.kind === "prop") {
+      const current = cellAt(col, row);
+      dirtyTiles.set(tileKey(col, row), {
+        tileType: current.tileType,
+        elevation: current.elevation,
+        blocksMovement: current.blocksMovement,
+        propType: tool.propType,
       });
     } else if (tool.kind === "player-spawn") {
       state.playerSpawnCol = col;
@@ -1153,7 +1246,14 @@ export function renderMapEditor(
     };
     const tiles: MapTileDTO[] = [...dirtyTiles.entries()].map(([key, cell]) => {
       const [col, row] = key.split(",").map(Number);
-      return { col, row, tileType: cell.tileType, elevation: cell.elevation, blocksMovement: cell.blocksMovement };
+      return {
+        col,
+        row,
+        tileType: cell.tileType,
+        elevation: cell.elevation,
+        blocksMovement: cell.blocksMovement,
+        propType: cell.propType,
+      };
     });
 
     try {

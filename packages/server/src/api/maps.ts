@@ -4,7 +4,15 @@ import { asyncRoute } from "./errors.js";
 import { requireAdmin } from "./adminAuth.js";
 import { notifyContentChanged } from "../contentEvents.js";
 import { TileType } from "shared";
-import type { GameMapDTO, GameMapInput, DungeonObjectiveKind, ActiveMapResponse, MapTileDTO, MapTilesUpdateInput } from "shared";
+import type {
+  GameMapDTO,
+  GameMapInput,
+  DungeonObjectiveKind,
+  ActiveMapResponse,
+  MapTileDTO,
+  MapTilesUpdateInput,
+  PropType,
+} from "shared";
 import type { GameMap, MonsterSpawn, NpcSpawn, MapAmbientSpawn, MapPortal, DungeonObjective } from "@prisma/client";
 
 export const mapsRouter = Router();
@@ -144,16 +152,23 @@ mapsRouter.get(
     });
     res.json(
       tiles.map(
-        (t): MapTileDTO => ({ col: t.col, row: t.row, tileType: t.tileType, elevation: t.elevation, blocksMovement: t.blocksMovement }),
+        (t): MapTileDTO => ({
+          col: t.col,
+          row: t.row,
+          tileType: t.tileType,
+          elevation: t.elevation,
+          blocksMovement: t.blocksMovement,
+          propType: t.propType as PropType | null,
+        }),
       ),
     );
   }),
 );
 
 // Admin-only: paints (or, for entries back at the full default — Grass at
-// elevation 0 with no barrier — resets to default, deleting the row) a batch
-// of tiles. Batched so an editor Save flushes all dirty cells in one request
-// rather than one write per paint stroke.
+// elevation 0 with no barrier and no prop — resets to default, deleting the
+// row) a batch of tiles. Batched so an editor Save flushes all dirty cells
+// in one request rather than one write per paint stroke.
 mapsRouter.put(
   "/:id/tiles",
   requireAdmin,
@@ -163,11 +178,16 @@ mapsRouter.put(
 
     await prisma.$transaction(
       body.tiles.map((tile) =>
-        tile.tileType === TileType.Grass && tile.elevation === 0 && !tile.blocksMovement
+        tile.tileType === TileType.Grass && tile.elevation === 0 && !tile.blocksMovement && !tile.propType
           ? prisma.mapTile.deleteMany({ where: { mapId, col: tile.col, row: tile.row } })
           : prisma.mapTile.upsert({
               where: { mapId_col_row: { mapId, col: tile.col, row: tile.row } },
-              update: { tileType: tile.tileType, elevation: tile.elevation, blocksMovement: tile.blocksMovement },
+              update: {
+                tileType: tile.tileType,
+                elevation: tile.elevation,
+                blocksMovement: tile.blocksMovement,
+                propType: tile.propType,
+              },
               create: {
                 mapId,
                 col: tile.col,
@@ -175,6 +195,7 @@ mapsRouter.put(
                 tileType: tile.tileType,
                 elevation: tile.elevation,
                 blocksMovement: tile.blocksMovement,
+                propType: tile.propType,
               },
             }),
       ),

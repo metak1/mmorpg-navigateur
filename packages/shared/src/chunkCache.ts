@@ -1,4 +1,5 @@
 import { TileType, CHUNK_SIZE, chunkKeyFor, chunkOriginFromKey, type WorldGrid } from "./map.js";
+import type { PropType } from "./api-types.js";
 
 export interface TileRangeEntry {
   col: number;
@@ -6,12 +7,14 @@ export interface TileRangeEntry {
   tileType: number;
   elevation: number;
   blocksMovement: boolean;
+  propType: PropType | null;
 }
 
 interface TileCell {
   tileType: number;
   elevation: number;
   blocksMovement: boolean;
+  propType: PropType | null;
 }
 
 // Fetches every explicitly-painted tile within a rectangular tile-space
@@ -26,7 +29,7 @@ export type FetchRangeFn = (
 ) => Promise<TileRangeEntry[]>;
 
 const DEFAULT_MAX_CHUNKS = 2000;
-const DEFAULT_CELL: TileCell = { tileType: TileType.Grass, elevation: 0, blocksMovement: false };
+const DEFAULT_CELL: TileCell = { tileType: TileType.Grass, elevation: 0, blocksMovement: false, propType: null };
 
 // Backs a WorldGrid with a sparse, on-demand-loaded tile source. See
 // map.ts's WorldGrid doc comment for why "chunk hasn't loaded yet" and
@@ -57,6 +60,12 @@ export class ChunkTileCache implements WorldGrid {
 
   blocksMovementAt(col: number, row: number): boolean {
     return this.cellAt(col, row).blocksMovement;
+  }
+
+  // Purely a rendering lookup (see WorldScene.createChunkLayer) — not part
+  // of the WorldGrid interface, since propType has no effect on collision.
+  propTypeAt(col: number, row: number): PropType | null {
+    return this.cellAt(col, row).propType;
   }
 
   private cellAt(col: number, row: number): TileCell {
@@ -178,6 +187,7 @@ export class ChunkTileCache implements WorldGrid {
         tileType: entry.tileType,
         elevation: entry.elevation,
         blocksMovement: entry.blocksMovement,
+        propType: entry.propType,
       };
     }
   }

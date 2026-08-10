@@ -99,6 +99,11 @@ function startGame(token: string, characterId: string, roomId?: string, mapId?: 
     parent: "app",
     backgroundColor: "#222222",
     disableContextMenu: true,
+    // Every sprite in this game (character/monster tiles, terrain blocks) is
+    // small pixel art meant to be viewed blown up — without this Phaser's
+    // default bilinear sampling blurs them into a smeary mess the moment
+    // they're scaled above their native size.
+    pixelArt: true,
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
