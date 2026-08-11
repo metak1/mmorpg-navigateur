@@ -100,10 +100,19 @@ function startGame(token: string, characterId: string, roomId?: string, mapId?: 
     backgroundColor: "#222222",
     disableContextMenu: true,
     // Every sprite in this game (character/monster tiles, terrain blocks) is
-    // small pixel art meant to be viewed blown up — without this Phaser's
-    // default bilinear sampling blurs them into a smeary mess the moment
-    // they're scaled above their native size.
-    pixelArt: true,
+    // small pixel art meant to be viewed blown up — antialias:false keeps
+    // texture sampling nearest-neighbor (Phaser's default bilinear would
+    // blur them into a smeary mess the moment they're scaled above their
+    // native size) without touching antialiasGL, so the WebGL context
+    // itself still gets real MSAA. That split (rather than the `pixelArt:
+    // true` shorthand, which forces antialiasGL off too) is specifically so
+    // vector-drawn overlays — e.g. WorldScene's per-tile terrain grid lines,
+    // diagonal under this iso projection — render as smooth strokes instead
+    // of a jagged staircase, while every sprite stays exactly as crisp.
+    pixelArt: false,
+    antialias: false,
+    antialiasGL: true,
+    roundPixels: true,
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,

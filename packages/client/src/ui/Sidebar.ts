@@ -3,6 +3,8 @@ import {
   canLearnTalent,
   type EquipmentSlot,
   type ItemSlotType,
+  type ItemRarity,
+  type ItemStatBonuses,
   type InventoryStateMessage,
   type TalentTemplateDTO,
   type LearnedTalentView,
@@ -11,6 +13,7 @@ import {
   type OpenPartyView,
 } from "shared";
 import { groupFinder, type GroupFinderHandlers } from "./GroupFinder.js";
+import { iconForSlotType } from "./itemIcons.js";
 
 type PanelKey = "chat" | "inventory" | "quests" | "stats" | "talents" | "party";
 
@@ -28,12 +31,178 @@ const SLOT_LABELS: Record<EquipmentSlot, string> = {
   trinket2: "Trinket 2",
 };
 
+// Bag items carry an ItemSlotType (the category — "ring", not "ring1"), so
+// tooltips there need their own label map, separate from SLOT_LABELS (which
+// is keyed by the concrete EquipmentSlot a paperdoll box occupies).
+const SLOT_LABELS_BY_TYPE: Record<ItemSlotType, string> = {
+  helmet: "Helmet",
+  gloves: "Gloves",
+  chest: "Chest",
+  spalders: "Spalders",
+  boots: "Boots",
+  legs: "Legs",
+  amulet: "Amulet",
+  ring: "Ring",
+  trinket: "Trinket",
+};
+
+// Inverse of the ring1/ring2/trinket1/trinket2 split — for picking which
+// icon an equipped paperdoll box shows (icons are keyed by category, same
+// as SLOT_LABELS_BY_TYPE, not by the specific numbered slot).
+function slotTypeForEquipmentSlot(slot: EquipmentSlot): ItemSlotType {
+  if (slot === "ring1" || slot === "ring2") return "ring";
+  if (slot === "trinket1" || slot === "trinket2") return "trinket";
+  return slot;
+}
+
 // Equipping a ring/trinket-category item doesn't ask which of the two slots
 // to use — it fills the first empty one, or replaces slot 1 if both are full.
 function pickTargetSlot(slotType: ItemSlotType, equippedSlots: ReadonlySet<EquipmentSlot>): EquipmentSlot {
   if (slotType === "ring") return equippedSlots.has("ring1") ? "ring2" : "ring1";
   if (slotType === "trinket") return equippedSlots.has("trinket1") ? "trinket2" : "trinket1";
   return slotType;
+}
+
+const STAT_BONUS_LABELS: Record<keyof ItemStatBonuses, string> = {
+  bonusArmor: "Armor",
+  bonusStrength: "Strength",
+  bonusIntelligence: "Intelligence",
+  bonusDexterity: "Dexterity",
+  bonusCriticalChance: "Critical Chance",
+  bonusHp: "Health",
+};
+
+function statBonusLines(stats: ItemStatBonuses): string[] {
+  const lines: string[] = [];
+  for (const key of Object.keys(STAT_BONUS_LABELS) as Array<keyof ItemStatBonuses>) {
+    const value = stats[key];
+    if (value === 0) continue;
+    const suffix = key === "bonusCriticalChance" ? "%" : "";
+    lines.push(`${value > 0 ? "+" : ""}${value}${suffix} ${STAT_BONUS_LABELS[key]}`);
+  }
+  return lines;
+}
+
+// Shared by both equipment slots and bag tiles — a rarity-colored title,
+// the slot category (only relevant for equipment/equippable bag items),
+// non-zero stat bonuses, and the description, in that WoW-tooltip order.
+function buildItemTooltip(
+  name: string,
+  rarity: ItemRarity,
+  description: string,
+  slotLabel: string | null,
+  stats: ItemStatBonuses,
+): HTMLDivElement {
+  const tooltip = document.createElement("div");
+  tooltip.className = "item-tooltip";
+
+  const title = document.createElement("div");
+  title.className = `item-tooltip-title rarity-${rarity}`;
+  title.textContent = name;
+  tooltip.appendChild(title);
+
+  if (slotLabel) {
+    const slotLine = document.createElement("div");
+    slotLine.className = "item-tooltip-slot";
+    slotLine.textContent = slotLabel;
+    tooltip.appendChild(slotLine);
+  }
+
+  const lines = statBonusLines(stats);
+  if (lines.length > 0) {
+    const statsEl = document.createElement("div");
+    statsEl.className = "item-tooltip-stats";
+    for (const line of lines) {
+      const row = document.createElement("div");
+      row.textContent = line;
+      statsEl.appendChild(row);
+    }
+    tooltip.appendChild(statsEl);
+  }
+
+  if (description) {
+    const desc = document.createElement("div");
+    desc.className = "item-tooltip-desc";
+    desc.textContent = description;
+    tooltip.appendChild(desc);
+  }
+
+  return tooltip;
+}
+
+// One square icon tile — used for both equipped-slot boxes and bag slots,
+// same visual language WoW uses for both. rarity === null means an empty
+// slot (grayed out, no click handler); tooltip is optional so genuinely
+// empty bag-padding slots (no item, no category to explain) can render with
+// none at all.
+function buildItemTile(
+  icon: string | null,
+  rarity: ItemRarity | null,
+  quantity: number | undefined,
+  tooltip: HTMLElement | null,
+  onClick?: () => void,
+): HTMLDivElement {
+  const tile = document.createElement("div");
+  tile.className = `item-tile ${rarity ? `filled rarity-${rarity}` : "empty"}`;
+  if (icon) tile.textContent = icon;
+
+  if (quantity && quantity > 1) {
+    const qty = document.createElement("span");
+    qty.className = "item-tile-qty";
+    qty.textContent = String(quantity);
+    tile.appendChild(qty);
+  }
+
+  if (tooltip) {
+    tile.appendChild(tooltip);
+    attachHoverTooltip(tile, tooltip);
+  }
+
+  if (onClick) tile.addEventListener("click", onClick);
+
+  return tile;
+}
+
+// Bag slots are a fixed grid (same idea as WoW's bag squares), padded with
+// empty tiles past the last real item — always at least two full rows, and
+// always at least one empty slot after the last item, so it never reads as
+// a suspiciously-exact-fit list. There's no actual inventory-size cap
+// server-side (see WorldRoom.sendInventoryState) so this never truncates
+// real items, it only ever adds more rows. BAG_COLUMNS is only used for
+// that row-rounding math — the actual CSS layout (#bag-grid) uses
+// auto-fill so it's never wrong if the sidebar's width ever changes; this
+// just needs to be a reasonable assumption for "how wide is a row".
+const BAG_COLUMNS = 6;
+const BAG_MIN_ROWS = 2;
+
+// Shared by talent nodes and item tiles (equipment/bag) — position:fixed
+// with JS-computed top/left rather than a CSS anchor, since both live
+// inside #sidebar-body's overflow-y:auto and a CSS-anchored tooltip would
+// get clipped by that ancestor whenever the anchor is near the top/bottom
+// of the scroll area. Flips above/below based on real available space and
+// clamps horizontally to the viewport.
+function attachHoverTooltip(anchor: HTMLElement, tooltip: HTMLElement) {
+  const gap = 8;
+  anchor.addEventListener("mouseenter", () => {
+    tooltip.style.display = "block";
+    const anchorRect = anchor.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const showBelow = anchorRect.top < tooltipRect.height + gap;
+    tooltip.style.top = showBelow
+      ? `${anchorRect.bottom + gap}px`
+      : `${anchorRect.top - tooltipRect.height - gap}px`;
+    const left = Math.max(
+      4,
+      Math.min(
+        anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2,
+        window.innerWidth - tooltipRect.width - 4,
+      ),
+    );
+    tooltip.style.left = `${left}px`;
+  });
+  anchor.addEventListener("mouseleave", () => {
+    tooltip.style.display = "none";
+  });
 }
 
 // Must match .talent-node-icon's width/height and .talent-tier-row's gap in
@@ -486,6 +655,8 @@ export class Sidebar {
     this.bodyEl.appendChild(sheet);
   }
 
+  // WoW-style: every item (equipped or bagged) is a square icon tile,
+  // hover for a tooltip with its stats — see buildItemTile/buildItemTooltip.
   private renderInventory(inventory: InventoryStateMessage) {
     const wrapper = document.createElement("div");
     wrapper.id = "inventory-panel";
@@ -496,25 +667,25 @@ export class Sidebar {
     const grid = document.createElement("div");
     grid.id = "equipment-grid";
     for (const slot of EQUIPMENT_SLOTS) {
-      const box = document.createElement("div");
       const equipped = equippedBySlot.get(slot);
-      box.className = `equipment-slot ${equipped ? `filled rarity-${equipped.rarity}` : "empty"}`;
-
-      const label = document.createElement("div");
-      label.className = "equipment-slot-label";
-      label.textContent = SLOT_LABELS[slot];
-      box.appendChild(label);
+      const slotLabel = SLOT_LABELS[slot];
 
       if (equipped) {
-        const name = document.createElement("div");
-        name.className = "equipment-slot-item";
-        name.textContent = equipped.name;
-        box.appendChild(name);
-        box.title = "Click to unequip";
-        box.addEventListener("click", () => this.inventoryHandlers?.onUnequip(slot));
+        const tooltip = buildItemTooltip(equipped.name, equipped.rarity, equipped.description, slotLabel, equipped);
+        const tile = buildItemTile(iconForSlotType(slotTypeForEquipmentSlot(slot)), equipped.rarity, undefined, tooltip, () =>
+          this.inventoryHandlers?.onUnequip(slot),
+        );
+        tile.title = "Click to unequip";
+        grid.appendChild(tile);
+      } else {
+        const tooltip = document.createElement("div");
+        tooltip.className = "item-tooltip";
+        const title = document.createElement("div");
+        title.className = "item-tooltip-slot-empty";
+        title.textContent = `${slotLabel} (Empty)`;
+        tooltip.appendChild(title);
+        grid.appendChild(buildItemTile(iconForSlotType(slotTypeForEquipmentSlot(slot)), null, undefined, tooltip));
       }
-
-      grid.appendChild(box);
     }
     wrapper.appendChild(grid);
 
@@ -523,44 +694,24 @@ export class Sidebar {
     bagHeader.textContent = "Bag";
     wrapper.appendChild(bagHeader);
 
-    const bagList = document.createElement("div");
-    bagList.id = "bag-list";
-    if (inventory.items.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "bag-empty";
-      empty.textContent = "Empty";
-      bagList.appendChild(empty);
-    }
+    const bagGrid = document.createElement("div");
+    bagGrid.id = "bag-grid";
 
     for (const item of inventory.items) {
-      const row = document.createElement("div");
-      row.className = `bag-item rarity-${item.rarity}`;
-
-      const info = document.createElement("div");
-      info.className = "bag-item-info";
-      const name = document.createElement("div");
-      name.className = "bag-item-name";
-      name.textContent = item.quantity > 1 ? `${item.name} x${item.quantity}` : item.name;
-      const desc = document.createElement("div");
-      desc.className = "bag-item-desc";
-      desc.textContent = item.description;
-      info.append(name, desc);
-      row.appendChild(info);
-
-      if (item.slotType) {
-        const slotType = item.slotType;
-        const button = document.createElement("button");
-        button.textContent = "Equip";
-        button.addEventListener("click", () => {
-          const slot = pickTargetSlot(slotType, equippedSlots);
-          this.inventoryHandlers?.onEquip(item.itemId, slot);
-        });
-        row.appendChild(button);
-      }
-
-      bagList.appendChild(row);
+      const tooltip = buildItemTooltip(item.name, item.rarity, item.description, item.slotType ? SLOT_LABELS_BY_TYPE[item.slotType] : null, item);
+      const onClick = item.slotType
+        ? () => this.inventoryHandlers?.onEquip(item.itemId, pickTargetSlot(item.slotType!, equippedSlots))
+        : undefined;
+      const tile = buildItemTile(iconForSlotType(item.slotType), item.rarity, item.quantity, tooltip, onClick);
+      if (item.slotType) tile.title = "Click to equip";
+      bagGrid.appendChild(tile);
     }
-    wrapper.appendChild(bagList);
+
+    const totalSlots = Math.max(BAG_COLUMNS * BAG_MIN_ROWS, Math.ceil((inventory.items.length + 1) / BAG_COLUMNS) * BAG_COLUMNS);
+    for (let i = inventory.items.length; i < totalSlots; i++) {
+      bagGrid.appendChild(buildItemTile(null, null, undefined, null));
+    }
+    wrapper.appendChild(bagGrid);
 
     this.bodyEl.appendChild(wrapper);
   }
@@ -656,33 +807,7 @@ export class Sidebar {
         tooltipRank.textContent = `Rank ${rank} / ${talent.maxRank}`;
         tooltip.append(tooltipTitle, tooltipDesc, tooltipRank);
         icon.appendChild(tooltip);
-
-        // Positioned in JS (fixed, not CSS-anchored to the icon) so it can
-        // flip above/below based on real available space and clamp
-        // horizontally to the viewport — see the .talent-tooltip comment in
-        // index.html for why a pure-CSS anchor gets clipped near the edges
-        // of the scrollable talent tree.
-        const gap = 8;
-        icon.addEventListener("mouseenter", () => {
-          tooltip.style.display = "block";
-          const iconRect = icon.getBoundingClientRect();
-          const tooltipRect = tooltip.getBoundingClientRect();
-          const showBelow = iconRect.top < tooltipRect.height + gap;
-          tooltip.style.top = showBelow
-            ? `${iconRect.bottom + gap}px`
-            : `${iconRect.top - tooltipRect.height - gap}px`;
-          const left = Math.max(
-            4,
-            Math.min(
-              iconRect.left + iconRect.width / 2 - tooltipRect.width / 2,
-              window.innerWidth - tooltipRect.width - 4,
-            ),
-          );
-          tooltip.style.left = `${left}px`;
-        });
-        icon.addEventListener("mouseleave", () => {
-          tooltip.style.display = "none";
-        });
+        attachHoverTooltip(icon, tooltip);
 
         row.appendChild(icon);
         nodeEls.set(talent.id, icon);

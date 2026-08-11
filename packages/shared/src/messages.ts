@@ -162,7 +162,22 @@ export interface EquipActionFailedMessage {
   reason: string;
 }
 
-export interface InventoryItemView {
+// The stat bonuses an equippable ItemTemplate carries (see
+// shared/src/api-types.ts's ItemTemplateDTO) — split out so both inventory
+// views below can share it instead of repeating all six fields twice. Sent
+// on every item now (not just ItemTemplateDTO, which only the admin/REST
+// side sees) so the bag/equipment tooltip can show what an item actually
+// does instead of just its name and description.
+export interface ItemStatBonuses {
+  bonusArmor: number;
+  bonusStrength: number;
+  bonusIntelligence: number;
+  bonusDexterity: number;
+  bonusCriticalChance: number;
+  bonusHp: number;
+}
+
+export interface InventoryItemView extends ItemStatBonuses {
   itemId: string;
   name: string;
   description: string;
@@ -172,10 +187,11 @@ export interface InventoryItemView {
   quantity: number;
 }
 
-export interface EquippedItemView {
+export interface EquippedItemView extends ItemStatBonuses {
   slot: EquipmentSlot;
   itemId: string;
   name: string;
+  description: string;
   color: number;
   rarity: ItemRarity;
 }

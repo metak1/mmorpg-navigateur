@@ -246,36 +246,80 @@
       }
       .bag-item button.group-finder-decline-btn:hover { background: #3a1414; }
 
-      /* Rarity accents, reused for both equipped slots and bag rows. */
-      .rarity-common { border-color: #555 !important; }
-      .rarity-rare { border-color: #4d9fff !important; }
-      .rarity-epic { border-color: #c060f0 !important; }
-      .rarity-legendary { border-color: #ff9d2e !important; }
+      /* Rarity accents. border-color is reused by both equipped slots and
+         bag rows (that predates item tiles); color is additionally used by
+         .item-tooltip-title so an item's name reads in its rarity color,
+         same as WoW — safe to add here since nothing un-styled sits
+         directly inside a rarity-classed element (every text child, e.g.
+         .bag-item-name, sets its own explicit color that wins). */
+      .rarity-common { border-color: #555 !important; color: #aaa; }
+      .rarity-rare { border-color: #4d9fff !important; color: #4d9fff; }
+      .rarity-epic { border-color: #c060f0 !important; color: #c060f0; }
+      .rarity-legendary { border-color: #ff9d2e !important; color: #ff9d2e; }
 
       #inventory-panel { display: flex; flex-direction: column; gap: 6px; }
       #equipment-grid {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(4, 40px);
+        justify-content: center;
         gap: 6px;
         margin-bottom: 4px;
       }
-      .equipment-slot {
+
+      /* One square icon tile — shared by equipment paperdoll boxes and bag
+         slots, same visual language WoW uses for both. An empty tile still
+         shows its category's icon (faint), so a bare paperdoll box still
+         communicates what goes there without an always-on text label. */
+      .item-tile {
+        position: relative;
+        width: 40px;
+        height: 40px;
         display: flex;
-        flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 2px;
-        min-height: 48px;
-        padding: 4px;
-        border: 1px solid #333;
+        border: 2px solid #333;
         border-radius: 6px;
-        text-align: center;
+        background: #1a1a1a;
+        font-size: 20px;
+        line-height: 1;
+        user-select: none;
       }
-      .equipment-slot.empty { background: #161616; }
-      .equipment-slot.filled { background: #1f1f1f; cursor: pointer; }
-      .equipment-slot.filled:hover { background: #292929; }
-      .equipment-slot-label { color: #777; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
-      .equipment-slot-item { color: #fff; font-size: 12px; font-weight: 600; }
+      .item-tile.empty { opacity: 0.35; }
+      .item-tile.filled { cursor: pointer; }
+      .item-tile.filled:hover { background: #262626; }
+      .item-tile-qty {
+        position: absolute;
+        right: -4px;
+        bottom: -4px;
+        padding: 1px 4px;
+        border: 1px solid #555;
+        border-radius: 4px;
+        background: #000;
+        color: #ccc;
+        font-size: 9px;
+        font-weight: 600;
+      }
+
+      /* Same fixed-position/JS-flip approach as .talent-tooltip (see that
+         comment below) — item tiles live inside the same scrollable
+         #sidebar-body. */
+      .item-tooltip {
+        display: none;
+        position: fixed;
+        width: 190px;
+        padding: 8px;
+        border: 1px solid #444;
+        border-radius: 6px;
+        background: #111;
+        text-align: left;
+        z-index: 50;
+        pointer-events: none;
+      }
+      .item-tooltip-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+      .item-tooltip-slot, .item-tooltip-slot-empty { color: #777; font-size: 11px; margin-bottom: 4px; }
+      .item-tooltip-stats { margin-bottom: 4px; }
+      .item-tooltip-stats div { color: #4d9fff; font-size: 11px; }
+      .item-tooltip-desc { color: #999; font-size: 11px; font-style: italic; }
 
       #bag-header {
         color: #999;
@@ -286,7 +330,10 @@
         padding-top: 10px;
         border-top: 1px solid #2a2a2a;
       }
-      #bag-list { display: flex; flex-direction: column; gap: 8px; }
+      /* auto-fill (not a hardcoded column count) so the grid always fits
+         however wide #sidebar-body's content box actually is instead of
+         risking overflow if that width ever changes. */
+      #bag-grid { display: grid; grid-template-columns: repeat(auto-fill, 40px); gap: 6px; }
       .bag-empty { color: #555; font-size: 12px; }
       .bag-item {
         display: flex;

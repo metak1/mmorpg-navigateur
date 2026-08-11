@@ -3,6 +3,62 @@ export enum TileType {
   Path = 1,
   Water = 2,
   Wall = 3,
+  // 4.. — the full Kenney "Isometric Blocks" voxel set (see
+  // client/src/assets.ts's TERRAIN_FULL_TEXTURE_KEYS), added so the admin
+  // map editor's palette can offer every block in the pack.
+  Sand = 4,
+  Snow = 5,
+  GreenBlock = 6,
+  OrangeTerracottaSolid = 7,
+  Hedge = 8,
+  Ice = 9,
+  CrackedIce = 10,
+  MoltenRock = 11,
+  Stone = 12,
+  GrassStoneSides = 13,
+  DirtStoneSides = 14,
+  SandStoneSides = 15,
+  SnowStoneSides = 16,
+  WoodLog = 17,
+  Marble = 18,
+  JadeBlock = 19,
+  RedBrick = 20,
+  Sandstone = 21,
+  WhiteMarbleSolid = 22,
+  TerracottaSmooth = 23,
+  GreenWool = 24,
+  BlueWool = 25,
+  CreamWool = 26,
+  WoodPlanks = 27,
+  BrickCoursed = 28,
+  RockyDirt = 29,
+  SpeckledStone = 30,
+  DarkStoneBrick = 31,
+  CoalOre = 32,
+  EmeraldOre = 33,
+  CopperOre = 34,
+  IronOre = 35,
+  GoldOre = 36,
+  DiamondOre = 37,
+  RedClay = 38,
+  RedClayMottled = 39,
+  RedClayRough = 40,
+  RedClayEmerald = 41,
+  RedClayEmeraldRich = 42,
+  BasaltCoal = 43,
+  StoneEmeraldAlt = 44,
+  StoneCopperAlt = 45,
+  StoneIronAlt = 46,
+  StoneGoldRich = 47,
+  StoneDiamondAlt = 48,
+  LightGrayStone = 49,
+  PaleStone = 50,
+  SlateStone = 51,
+  SlateRuby = 52,
+  SlateRubyRich = 53,
+  DirtSolid = 54,
+  GrassSolidBright = 55,
+  GrassClassic = 56,
 }
 
 // The world is infinite and hand-authored: there is no bounded grid anymore,
@@ -122,16 +178,22 @@ export function getElevationAt(grid: WorldGrid, xPixel: number, yPixel: number):
 // How far "toward the camera" to look for terrain tall enough to visually
 // hide something standing at a given point — purely a rendering concern
 // (see WorldScene, which fades an entity's sprite when this is true), not
-// gameplay-authoritative like resolveMovement/hasLineOfSight.
-const OCCLUSION_CHECK_TILES = 1.5;
+// gameplay-authoritative like resolveMovement/hasLineOfSight. Exported so
+// WorldScene's own client-only wall-specific scan (used for per-pixel mask
+// occlusion, see findOccludingWallSprite) covers the exact same distance.
+export const OCCLUSION_CHECK_TILES = 1.5;
 
 // The (+1,+1) world diagonal is the direction whose projection is straight
 // down the screen (isoProject(1,1) = {x:0, y:1)) — i.e. "toward the viewer"
 // in this 2:1 iso projection, the same convention that makes south/east the
-// visible ("front") cliff-face edges elsewhere in map.ts/WorldScene. Only
-// a genuine cliff (more than one elevation level higher, matching
-// MAX_ELEVATION_STEP — the same threshold that makes it unwalkable) hides
-// what's behind it; a merely-climbable 1-level rise doesn't.
+// visible ("front") cliff-face edges elsewhere in map.ts/WorldScene. Two
+// independent things hide whatever's standing at (x,y): a genuine cliff
+// (more than one elevation level higher, matching MAX_ELEVATION_STEP — the
+// same threshold that makes it unwalkable — a merely-climbable 1-level rise
+// doesn't count) closer to the camera, or a Wall tile closer to the camera
+// at ANY elevation — a Wall is a solid obstacle by definition (see
+// isWalkable), so unlike a cliff it hides things behind it regardless of
+// how tall it visually renders.
 export function isHiddenByTerrain(grid: WorldGrid, x: number, y: number): boolean {
   const ownElevation = getElevationAt(grid, x, y);
   const maxDist = grid.tileSize * OCCLUSION_CHECK_TILES;
@@ -140,6 +202,7 @@ export function isHiddenByTerrain(grid: WorldGrid, x: number, y: number): boolea
   for (let i = 1; i <= steps; i++) {
     const d = (i / steps) * maxDist * Math.SQRT1_2;
     if (getElevationAt(grid, x + d, y + d) > ownElevation + MAX_ELEVATION_STEP) return true;
+    if (getTileAt(grid, x + d, y + d) === TileType.Wall) return true;
   }
   return false;
 }

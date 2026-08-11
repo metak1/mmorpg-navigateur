@@ -304,7 +304,14 @@ export interface ActiveMapResponse {
 // purely visual (see client/src/assets.ts's PROP_TEXTURE_KEYS), no gameplay
 // effect of its own. Pair with blocksMovement on the same cell if it should
 // also be solid (e.g. a dresser blocking a doorway).
-export const PROP_TYPES = ["table", "chest", "dresser", "barrel", "torch", "door", "fence", "gravestone"] as const;
+export const PROP_TYPES = [
+  "table", "chest", "dresser", "barrel", "torch", "door", "fence", "gravestone",
+  // Below: the full Kenney "Isometric Blocks" (furnace/crate) and "Tiny
+  // Dungeon" packs, added so the admin map editor's Furniture palette can
+  // offer everything in both packs, not just this project's original
+  // hand-picked eight.
+  "furnace", "crate", "dirtFloor", "dirtFloorVar2", "dirtFloorVar3", "dirtFloorVar4", "stoneArchwayTopLeft", "stoneArchwayTopRight", "stonePillarTop", "ironSconce", "torchSconceGreen", "greenGemTorch", "darkFloor", "darkFloorVar2", "dirtFloorPebbles", "dirtFloorPebbles2", "stoneArchwayOpenLeft", "stoneArchwayOpenRight", "stonePillarBase", "stonePillarCap", "wallSconce", "gargoyleFaceLeft", "gargoyleFaceRight", "darkWall", "darkWallVar2", "darkWallVar3", "dirtFloorRocks", "dirtFloorRocks2", "stoneFrameLeft", "stoneFrameRight", "stoneWall", "redBanner", "sandFloor", "stoneVent", "emeraldAltar", "woodDoorClosedLeft", "woodDoorClosedMid", "woodDoorClosedRight", "plankWall", "plankWallVar2", "plankWallVar3", "plankWallEdge", "stoneWallVar2", "crossWindow", "stoneFloorTiles", "stoneSarcophagus", "emeraldSarcophagus", "woodDoorKnobLeft", "woodDoorKnobMid", "woodDoorKnobRight", "sandFloorVar2", "sandFloorSpeckled", "sandFloorVar3", "sandFloorSpeckled2", "sandFloorVar4", "sandFloorVar5", "metalLocker", "metalLockerVar2", "shieldEmblem", "stoneBrickWall", "stoneBrickWallVar2", "stoneBrickWallVar3", "targetMarker", "bandageIcon", "clothIcon", "woodDresser", "anvil", "metalCabinet", "roundShield", "ironGate", "ironGateVar2", "spiralRailing", "labyrinthFloorPart1", "labyrinthFloorPart2", "woodTable", "woodStool", "golemHead", "woodDresserVar2", "woodFence", "woodFenceVar2", "woodFenceVar3", "woodFenceVar4", "labyrinthFloorPart3", "labyrinthFloorPart4", "labyrinthCenter", "labyrinthFloorPart5", "portraitPurpleWizard", "portraitVillager", "portraitVillagerVar2", "portraitDwarf", "portraitVillagerVar3", "chestClosed", "chestOpen", "mimicChest", "mimicChestOpenMouth", "labyrinthFloorPart6", "labyrinthFloorPart7", "labyrinthFloorPart8", "portraitKnight", "portraitKnightVar2", "portraitVillagerVar4", "portraitGirl", "portraitDwarfVar2", "frameIcon", "blueGem", "dagger", "sword", "swordOrnate", "swordSilver", "swordRuby", "slimeMonster", "ogreMonster", "crabMonster", "portraitOldMan", "portraitGreenDwarf", "potionGray", "potionGreen", "potionRed", "potionBlue", "hammer", "mace", "flail", "beastFace", "ghost", "monsterShield", "helmet", "helmetVar2", "staffGreen", "staffRed", "staffBlueTip", "staffBlue", "wandPurple", "wandBlue", "swordBasic",
+] as const;
 export type PropType = (typeof PROP_TYPES)[number];
 
 export interface MapTileDTO {

@@ -763,9 +763,16 @@ export class WorldRoom extends Room<RoomState> {
     });
   }
 
+  // maxRange is optional (unlimited range) on every kind that reaches this
+  // check — groundAoe clamps its landing point to maxRange instead of
+  // rejecting (see resolveGroundAoe), so it never calls this.
+  private isWithinSpellRange(ax: number, ay: number, bx: number, by: number, spell: SpellDef): boolean {
+    return spell.maxRange == null || Math.hypot(bx - ax, by - ay) <= spell.maxRange;
+  }
+
   // null means the cast is allowed to start. "heal" is always self-targeted
   // so there's no sightline to check; "groundAoe" checks the cast point,
-  // everything else checks the targeted monster.
+  // everything else checks the targeted monster's distance and sightline.
   private castRejectionReason(player: Player, spell: SpellDef, message: CastInputMessage): string | null {
     if (spell.kind === "heal") return null;
 
@@ -776,6 +783,7 @@ export class WorldRoom extends Room<RoomState> {
 
     const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
     if (!target) return "Invalid cast target";
+    if (!this.isWithinSpellRange(player.x, player.y, target.x, target.y, spell)) return "Too far away";
     return hasLineOfSight(this.chunkCache, player.x, player.y, target.x, target.y) ? null : "No line of sight";
   }
 
@@ -867,7 +875,11 @@ export class WorldRoom extends Room<RoomState> {
 
     if (spell.kind === "interrupt") {
       const interruptTarget = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
-      if (!interruptTarget || !hasLineOfSight(this.chunkCache, player.x, player.y, interruptTarget.x, interruptTarget.y)) {
+      if (
+        !interruptTarget ||
+        !this.isWithinSpellRange(player.x, player.y, interruptTarget.x, interruptTarget.y, spell) ||
+        !hasLineOfSight(this.chunkCache, player.x, player.y, interruptTarget.x, interruptTarget.y)
+      ) {
         client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
         return;
       }
@@ -885,7 +897,11 @@ export class WorldRoom extends Room<RoomState> {
     }
 
     const target = message.targetId ? this.state.monsters.get(message.targetId) : undefined;
-    if (!target || !hasLineOfSight(this.chunkCache, player.x, player.y, target.x, target.y)) {
+    if (
+      !target ||
+      !this.isWithinSpellRange(player.x, player.y, target.x, target.y, spell) ||
+      !hasLineOfSight(this.chunkCache, player.x, player.y, target.x, target.y)
+    ) {
       client.send("castFizzled", { spellId: message.spellId } satisfies CastFizzledMessage);
       return;
     }
@@ -1982,13 +1998,26 @@ export class WorldRoom extends Room<RoomState> {
         rarity: row.item.rarity as ItemRarity,
         slotType: row.item.slotType as ItemSlotType | null,
         quantity: row.quantity,
+        bonusArmor: row.item.bonusArmor,
+        bonusStrength: row.item.bonusStrength,
+        bonusIntelligence: row.item.bonusIntelligence,
+        bonusDexterity: row.item.bonusDexterity,
+        bonusCriticalChance: row.item.bonusCriticalChance,
+        bonusHp: row.item.bonusHp,
       })),
       equipped: equipped.map((row) => ({
         slot: row.slot as EquipmentSlot,
         itemId: row.itemId,
         name: row.item.name,
+        description: row.item.description,
         color: row.item.color,
         rarity: row.item.rarity as ItemRarity,
+        bonusArmor: row.item.bonusArmor,
+        bonusStrength: row.item.bonusStrength,
+        bonusIntelligence: row.item.bonusIntelligence,
+        bonusDexterity: row.item.bonusDexterity,
+        bonusCriticalChance: row.item.bonusCriticalChance,
+        bonusHp: row.item.bonusHp,
       })),
     };
     client.send("inventoryState", message);

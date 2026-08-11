@@ -1019,18 +1019,46 @@ export class WorldScene extends Phaser.Scene {
         .setDepth(tileDepth);
       terrainObjects.push(fullImg);
 
+      // Thin dark outline around the full top face (all 4 corners), on
+      // every tile regardless of elevation — the baked cube art has no
+      // contrast at all along its own top-face edges, so without this every
+      // block visually bleeds into its flat neighbors; a full outline on
+      // every tile is what actually reads each one as its own block.
+      const border = this.add.graphics().setDepth(tileDepth);
+      border.lineStyle(1, 0x000000, 0.55);
+      border.beginPath();
+      border.moveTo(corners[0].x, corners[0].y);
+      border.lineTo(corners[1].x, corners[1].y);
+      border.lineTo(corners[2].x, corners[2].y);
+      border.lineTo(corners[3].x, corners[3].y);
+      border.closePath();
+      border.strokePath();
+      terrainObjects.push(border);
+
       // Decorative furniture (see shared/src/api-types.ts's PropType) — a
       // real projectEntity-style depth (not tileDepth) since, unlike
       // terrain, a prop needs to interleave with moving players/monsters
       // (walking in front of or behind a table), not with other tiles.
       const propType = this.chunkCache.propTypeAt(col, row);
       if (propType) {
-        const rawCenterProj = isoProject(worldLeft + tileSize / 2, worldTop + tileSize / 2);
+        const propWorldX = worldLeft + tileSize / 2;
+        const propWorldY = worldTop + tileSize / 2;
+        const rawCenterProj = isoProject(propWorldX, propWorldY);
         const propImg = this.add
           .image(centerX, centerY, PROP_TEXTURE_KEYS[propType])
           .setOrigin(0.5, 0.85)
           .setDisplaySize(tileSize * 0.9, tileSize * 0.9)
           .setDepth(rawCenterProj.y);
+        // Deliberately more lenient than applyOcclusion's entity check
+        // (isHiddenByTerrain's single diagonal ray, which can miss a wall
+        // that's directly east/south rather than exactly on that 45°
+        // line): a prop should fade even if a wall only clips half of it,
+        // so this fades it whenever ANY neighboring cell (in any
+        // direction — a wall's rendered bulk visually bleeds into
+        // neighboring tiles' screen space either way) is a Wall tile. A
+        // prop never moves, so unlike an entity this only needs computing
+        // once, right here at creation, not every frame.
+        if (this.isNearWallTile(col, row)) propImg.setAlpha(OCCLUDED_ALPHA);
         propSprites.push(propImg);
       }
     }
@@ -1203,9 +1231,26 @@ export class WorldScene extends Phaser.Scene {
     };
   }
 
-  // Fades an entity (and its HP bar) while a cliff tall enough to hide them
-  // stands between their current tile and the camera — purely a rendering
-  // effect, see isHiddenByTerrain in shared/src/map.ts.
+  // True if any of the 8 cells surrounding (col,row), or the cell itself,
+  // is a Wall tile — deliberately a plain small-radius search rather than
+  // isHiddenByTerrain's directional ray (see the prop occlusion comment in
+  // createChunkLayer for why): a wall's rendered cube visually bleeds well
+  // past its own tile's diamond in every direction (the same overlap that
+  // makes ordinary flat terrain need painter's-algorithm depth sorting at
+  // all), so a prop on any neighboring cell can genuinely have a wall
+  // covering part of it regardless of which side that wall is on.
+  private isNearWallTile(col: number, row: number): boolean {
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        if (this.chunkCache.tileAt(col + dc, row + dr) === TileType.Wall) return true;
+      }
+    }
+    return false;
+  }
+
+  // Fades an entity (and its HP bar) while a cliff or wall tall enough to
+  // hide them stands between their current tile and the camera — purely a
+  // rendering effect, see isHiddenByTerrain in shared/src/map.ts.
   private applyOcclusion(entity: HpBarHolder, worldX: number, worldY: number) {
     const alpha = isHiddenByTerrain(this.chunkCache, worldX, worldY) ? OCCLUDED_ALPHA : 1;
     entity.rect.setAlpha(alpha);
@@ -1505,12 +1550,47 @@ export class WorldScene extends Phaser.Scene {
     if (!this.target || this.target.kind !== "monster") return;
     const local = this.entities.get(this.room.sessionId);
     const monster = this.monsters.get(this.target.id);
+    if (local && monster && spell.maxRange != null) {
+      // Raw world distance, matching how the server enforces maxRange (see
+      // WorldRoom.isWithinSpellRange) — not projected-screen distance, which
+      // isn't proportional to real distance under this iso projection.
+      const dist = Phaser.Math.Distance.Between(local.worldX, local.worldY, monster.worldX, monster.worldY);
+      if (dist > spell.maxRange) {
+        this.showBanner("Too far away");
+        return;
+      }
+    }
     if (local && monster && !hasLineOfSight(this.chunkCache, local.worldX, local.worldY, monster.worldX, monster.worldY)) {
       this.showBanner("No line of sight");
       return;
     }
     this.hud.beginCast(spellId, spell.name, now);
     this.room.send("cast", { spellId, targetId: this.target.id });
+  }
+
+  // Purely a visual hint on the hotbar (see Hud.setOutOfRange) — dims/reddens
+  // a spell's icon once the current target is farther than its maxRange, so
+  // the player can see a cast will be rejected before they even click. Only
+  // meaningful for targeted spells (heal is self-cast, groundAoe is aimed at
+  // the cursor and already has its own range ring — see armSpell) and only
+  // while a monster is actually targeted; with no target there's nothing to
+  // measure against, so every indicator is cleared instead of left stale.
+  private updateSpellRangeIndicators() {
+    if (!this.hud || !this.room) return;
+    const local = this.entities.get(this.room.sessionId);
+    const monster = this.target?.kind === "monster" ? this.monsters.get(this.target.id) : undefined;
+    for (const [spellId, spell] of this.spellDefs) {
+      if (spell.kind === "heal" || spell.kind === "groundAoe" || spell.maxRange == null) {
+        this.hud.setOutOfRange(spellId, false);
+        continue;
+      }
+      if (!local || !monster) {
+        this.hud.setOutOfRange(spellId, false);
+        continue;
+      }
+      const dist = Phaser.Math.Distance.Between(local.worldX, local.worldY, monster.worldX, monster.worldY);
+      this.hud.setOutOfRange(spellId, dist > spell.maxRange);
+    }
   }
 
   update(time: number, deltaMs: number) {
@@ -1655,6 +1735,8 @@ export class WorldScene extends Phaser.Scene {
     } else {
       this.attackRangeIndicator?.setVisible(false);
     }
+
+    this.updateSpellRangeIndicators();
 
     if (this.aimingSpell && this.room) {
       const local = this.entities.get(this.room.sessionId);

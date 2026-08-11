@@ -22,13 +22,18 @@ const CAST_BAR_HEIGHT = 14;
 
 type Visible = Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text;
 
+const OUT_OF_RANGE_COLOR = 0xff3333; // matches attackRangeIndicator/groundAoeRangeRing's "blocked" red
+const IN_RANGE_BORDER_COLOR = 0xffffff;
+
 interface SpellSlot {
   icon: Phaser.GameObjects.Image;
+  border: Phaser.GameObjects.Rectangle;
   cooldownOverlay: Phaser.GameObjects.Rectangle;
   cooldownText: Phaser.GameObjects.Text;
   cooldownMs: number;
   castTimeMs: number;
   lastCastAt: number;
+  outOfRange: boolean;
 }
 
 export class Hud {
@@ -107,9 +112,9 @@ export class Hud {
           if (pointer.leftButtonDown()) onSlotClick(spellId);
         });
       }
-      scene.add
+      const border = scene.add
         .rectangle(x, y, SLOT_SIZE, SLOT_SIZE)
-        .setStrokeStyle(2, 0xffffff, 0.6)
+        .setStrokeStyle(2, IN_RANGE_BORDER_COLOR, 0.6)
         .setScrollFactor(0)
         .setDepth(UI_DEPTH + 1);
       const cooldownOverlay = scene.add
@@ -129,7 +134,16 @@ export class Hud {
         .setDepth(UI_DEPTH + 4)
         .setVisible(false);
 
-      this.slots.set(spellId, { icon, cooldownOverlay, cooldownText, cooldownMs: 0, castTimeMs: 0, lastCastAt: -Infinity });
+      this.slots.set(spellId, {
+        icon,
+        border,
+        cooldownOverlay,
+        cooldownText,
+        cooldownMs: 0,
+        castTimeMs: 0,
+        lastCastAt: -Infinity,
+        outOfRange: false,
+      });
     });
 
     const castBarY = slotY - 22;
@@ -239,6 +253,19 @@ export class Hud {
     } else {
       slot.lastCastAt = nowMs;
     }
+  }
+
+  // Called every frame (see WorldScene.updateSpellRangeIndicators) for each
+  // targeted spell against the player's current target — purely a visual
+  // hint, the actual block/fizzle happens server-side (and the client
+  // pre-checks it too before sending "cast", see WorldScene.castSpell); this
+  // just lets the player see it's out of range before they even click.
+  setOutOfRange(spellId: SpellId, outOfRange: boolean) {
+    const slot = this.slots.get(spellId);
+    if (!slot || slot.outOfRange === outOfRange) return;
+    slot.outOfRange = outOfRange;
+    slot.border.setStrokeStyle(2, outOfRange ? OUT_OF_RANGE_COLOR : IN_RANGE_BORDER_COLOR, outOfRange ? 0.9 : 0.6);
+    slot.icon.setAlpha(outOfRange ? 0.45 : 1);
   }
 
   update(nowMs: number) {
