@@ -1019,23 +1019,6 @@ export class WorldScene extends Phaser.Scene {
         .setDepth(tileDepth);
       terrainObjects.push(fullImg);
 
-      // TEMP DEBUG — remove before finishing: outlines the tile's true
-      // world-grid diamond (from the raw corners) in magenta, plus a dot at
-      // its exact center, so I can visually check whether the rendered
-      // texture actually lines up with the mathematical grid cell.
-      const debugG = this.add.graphics().setDepth(100000);
-      debugG.lineStyle(1, 0xff00ff, 1);
-      debugG.beginPath();
-      debugG.moveTo(corners[0].x, corners[0].y);
-      debugG.lineTo(corners[1].x, corners[1].y);
-      debugG.lineTo(corners[2].x, corners[2].y);
-      debugG.lineTo(corners[3].x, corners[3].y);
-      debugG.closePath();
-      debugG.strokePath();
-      debugG.fillStyle(0xff00ff, 1);
-      debugG.fillCircle(centerX, centerY, 2);
-      terrainObjects.push(debugG);
-
       // Decorative furniture (see shared/src/api-types.ts's PropType) — a
       // real projectEntity-style depth (not tileDepth) since, unlike
       // terrain, a prop needs to interleave with moving players/monsters
